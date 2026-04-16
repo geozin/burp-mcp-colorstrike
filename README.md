@@ -40,6 +40,19 @@ Automatic pipeline on all history reads:
 - Static extensions filtered (images, fonts, CSS, JS, media, binaries)
 - Items > 10,000 chars truncated
 
+### HTTP/1.1 and HTTP/2 Auto-Detection
+`SendRequest`, `CreateRepeaterTab` and `SendToIntruder` automatically detect the HTTP version from the original request and send using the correct protocol — no manual configuration needed.
+
+- Request ending with `HTTP/2` → sent via `HttpMode.HTTP_2` using `HttpRequest.http2Request()`
+- Request ending with `HTTP/1.1` → sent as raw HTTP/1.1
+
+The detected version is reported in every `SendRequest` output:
+```
+version=HTTP/2 | injection=explicit(body:action) | payloads_count=3 | delay=0.5s
+```
+
+This ensures injection payloads land correctly regardless of the protocol used by the original request — critical for testing modern APIs that exclusively use HTTP/2.
+
 ---
 
 ## Token Economy
@@ -134,7 +147,7 @@ This avoids dumping full response bodies into context when a simple size differe
 
 ## System Prompt
 
-A purpose-built system prompt [`prompt_v20.md`](prompt_v20.md) drives the LLM through a structured workflow:
+A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structured workflow:
 
 - **Hard trigger** — first character of response is the tool call
 - **Zero-data policy** — never fabricates endpoints, CVEs or vulnerabilities
@@ -220,15 +233,14 @@ In the **MCP tab** within Burp Suite:
 
 ---
 
----
- 
 ## Usage Guide
- 
-A full step-by-step walkthrough of a real testing session — from triage to SQLi bypass confirmation — is available in [`USAGE.md`](USAGE.md).
- 
+
+A full step-by-step walkthrough of a real testing session — from triage to SQLi bypass confirmation — is available in [USAGE.md](USAGE.md).
+
 ---
 
 ## Credits
-Froyd [Github](https://github.com/CircuitSoul)  
+
+[CircuitSoul](https://github.com/CircuitSoul)  
 Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server)  
 MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
