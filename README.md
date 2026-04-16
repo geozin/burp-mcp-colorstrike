@@ -1,6 +1,6 @@
-# Burp MCP ColorStrike
+# burp-mcp-ColorStrike
 
-> A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads.
+> A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads — all without leaving your chat interface.
 
 A fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server) with a focus on manual penetration testing workflows.
 
@@ -39,6 +39,54 @@ Automatic pipeline on all history reads:
 - SVG / base64 / ViewState replaced with `[TRUNCATED]`
 - Static extensions filtered (images, fonts, CSS, JS, media, binaries)
 - Items > 10,000 chars truncated
+
+---
+
+## Token Economy
+
+ColorStrike is designed to minimize LLM context usage at every layer — fewer tokens means faster responses, lower cost, and less hallucination risk from irrelevant data.
+
+### 1. Highlight Filter — Only What Matters Reaches the LLM
+Only requests you explicitly marked with a color in Burp Proxy History are delivered. Everything else — uncolored requests, static assets, noise — is discarded before any data reaches the LLM.
+
+In a typical session with 200+ requests in Proxy History, the LLM might only see 10-15 highlighted items. That's a 90%+ reduction in input tokens on the first call.
+
+### 2. Three Read Levels — Load Only What You Need
+
+```
+GetProxyHttpHistory     → summary only (no values, no body, no response)
+                           ~500 tokens for 10 items
+        ↓ (if needed)
+GetRequestsByColor      → full request + response, truncated pipeline
+                           ~2,000 tokens per item
+        ↓ (if needed)
+GetRequestByIndex       → 100% raw, untruncated — full JWT, full body
+                           ~5,000+ tokens per item
+```
+
+The LLM starts at the cheapest level and only escalates when the attack vector requires it. JWT attacks always require `GetRequestByIndex` — but SQLi, IDOR, and mass assignment can be fully identified and exploited from `GetRequestsByColor` alone.
+
+### 3. Sanitization Pipeline — Noise Removed Before Delivery
+Every item passes through an automatic cleanup pipeline before reaching the LLM:
+
+| What | Before | After |
+|:-----|:-------|:------|
+| JWT tokens | `eyJhbGciOiJSUzI1NiJ9.eyJ1c2VyIjoiYWRtaW4...` (500+ chars) | `eyJ...[JWT TRUNCATED]` |
+| Bearer tokens | `Bearer eyJhbGciOiJSUzI1NiJ9...` | `Bearer [TOKEN TRUNCATED]` |
+| Cookies | `_ga=GA1.2.123; _fbp=fb.1.123; session=abc123; _abck=0B5B...` | `[4 cookies, session=abc123de...]` |
+| SVG / base64 | Inline data hundreds of chars long | `[TRUNCATED]` |
+| ViewState | `.NET ViewState blob` | `[TRUNCATED]` |
+| Oversized items | Full item > 10,000 chars | Truncated at 10,000 with `...(truncated)` |
+
+Cookies alone can save 200-400 tokens per request. JWT truncation saves 300-600 tokens per request.
+
+### 4. Differential Body Preview — Body Only When Useful
+`SendRequest` uses adaptive output logic after each attack:
+
+- **Sizes or status differ** between payloads → only size + status + latency shown — body is skipped because the diff is already clear
+- **Sizes and status are uniform** → first 500 chars of body shown for differential content analysis
+
+This avoids dumping full response bodies into context when a simple size difference already confirms the vulnerability.
 
 ---
 
@@ -109,7 +157,7 @@ A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structu
 ```bash
 git clone https://github.com/youruser/burp-mcp-ColorStrike.git
 cd burp-mcp-ColorStrike
-./gradlew embedProxyJar
+./gradlew build -x test
 ```
 
 Output: `build/libs/burp-mcp-all.jar`
@@ -173,6 +221,6 @@ In the **MCP tab** within Burp Suite:
 ---
 
 ## Credits
-
+froyd: https://github.com/CircuitSoul
 Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server).  
 MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
