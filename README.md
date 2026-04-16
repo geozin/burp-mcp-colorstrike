@@ -155,7 +155,7 @@ A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structu
 ### Build
 
 ```bash
-git clone https://github.com/youruser/burp-mcp-ColorStrike.git
+git clone https://github.com/geozin/burp-mcp-ColorStrike.git
 cd burp-mcp-ColorStrike
 ./gradlew build -x test
 ```
