@@ -1,4 +1,4 @@
-# Burp Mcp ColorStrike
+# Burp MCP ColorStrike
 
 > A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads — all without leaving your chat interface.
 
