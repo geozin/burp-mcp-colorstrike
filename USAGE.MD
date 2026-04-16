@@ -20,7 +20,7 @@ Ask the LLM to read the Burp history. It calls `GetProxyHttpHistory` and returns
 history burp
 ```
 
-![History triage](docs/burp-mcp-ColorStrike-history.png)
+![History triage](https://github.com/geozin/burp-mcp-colorstrike/blob/main/burp-mcp-ColorStrike-history.png)
 
 The LLM returns two tables:
 
@@ -84,7 +84,7 @@ Ask the LLM to deep-analyze a specific item by index. It calls `GetRequestByInde
 request #1123
 ```
 
-![Deep analysis](docs/burp-mcp-ColorStrike-deep-analyze.png)
+![Deep analysis](https://github.com/geozin/burp-mcp-colorstrike/blob/main/burp-mcp-ColorStrike-deep-analyze.png)
 
 The LLM runs all 6 analysis modules on item #1123 (`POST /Login.asp`):
 
