@@ -108,14 +108,14 @@ This avoids dumping full response bodies into context when a simple size differe
 | Tool | Parameters | Usage |
 |:-----|:-----------|:------|
 | `GetProxyHttpHistory` | `count`, `offset` | Overview / triage — color-grouped summary |
-| `GetProxyHttpHistoryRegex` | `regex`, `count`, `offset` | Search specific content in highlighted items |
+| `GetProxyHttpHistoryRegex` | `regex`, `count`, `offset` | Search specific content — **only highlighted items are searched**, unmarked items ignored |
 | `GetRequestsByColor` | `colors[]`, `count`, `offset` | Full analysis of a color group |
 | `GetRequestByIndex` | `index` | Deep analysis — full token, no truncation |
 | `SendRequest` | `index`, `payloads[]?`, `numberOfRequests?`, `delaySeconds?`, `injectAt?` | Only attack tool |
 | `CreateRepeaterTab` | `index`, `tabName?`, `payload?`, `injectAt?` | Send to Repeater by index |
 | `SendToIntruder` | `index`, `tabName?`, `payload?`, `injectAt?` | Send to Intruder by index |
-| `GetProxyWebsocketHistory` | `count`, `offset` | WebSocket history |
-| `GetProxyWebsocketHistoryRegex` | `regex`, `count`, `offset` | Filter WebSocket by regex |
+| `GetProxyWebsocketHistory` | `count`, `offset` | WebSocket history — filtered by **project scope** |
+| `GetProxyWebsocketHistoryRegex` | `regex`, `count`, `offset` | Filter WebSocket by regex — filtered by **project scope** |
 | `GenerateCollaboratorPayload` | `customData?` | Generate OOB payload for SSRF/Blind/DNS *(Pro only)* |
 | `GetCollaboratorInteractions` | `payloadId?` | Query Collaborator callbacks *(Pro only)* |
 | `UrlEncode` / `UrlDecode` | `content` | URL encode/decode |
@@ -241,6 +241,6 @@ A full step-by-step walkthrough of a real testing session — from triage to SQL
 
 ## Credits
 
-[CircuitSoul](https://github.com/CircuitSoul)  
+Froyd [CircuitSoul](https://github.com/CircuitSoul)  
 Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server)  
 MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
