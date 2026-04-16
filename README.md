@@ -134,7 +134,7 @@ This avoids dumping full response bodies into context when a simple size differe
 
 ## System Prompt
 
-A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structured workflow:
+A purpose-built system prompt [`prompt_v20.md`](prompt_v20.md) drives the LLM through a structured workflow:
 
 - **Hard trigger** — first character of response is the tool call
 - **Zero-data policy** — never fabricates endpoints, CVEs or vulnerabilities
