@@ -224,7 +224,7 @@ In the **MCP tab** within Burp Suite:
  
 ## Usage Guide
  
-A full step-by-step walkthrough of a real testing session — from triage to SQLi bypass confirmation — is available in [USAGE.md](USAGE.md).
+A full step-by-step walkthrough of a real testing session — from triage to SQLi bypass confirmation — is available in [`USAGE.md`](USAGE.md).
  
 ---
 
