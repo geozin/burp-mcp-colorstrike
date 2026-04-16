@@ -1,143 +1,178 @@
-# Burp Suite MCP Server Extension
+# burp-mcp-ColorStrike
 
-## Overview
+> A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads — all without leaving your chat interface.
 
-Integrate Burp Suite with AI Clients using the Model Context Protocol (MCP).
+A fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server) with a focus on manual penetration testing workflows.
 
-For more information about the protocol visit: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
+---
 
-## Features
+## What's Different from the Original
 
-- Connect Burp Suite to AI clients through MCP
-- Automatic installation for Claude Desktop
-- Comes with packaged Stdio MCP proxy server
+### Color-Based Triage Workflow
+Requests in Burp Proxy History are organized by highlight color. The LLM reads, groups and analyzes traffic by color — each color representing a different testing context or priority level.
 
-## Usage
+### Three Read Levels
+| Tool | Data | Purpose |
+|:-----|:-----|:--------|
+| `GetProxyHttpHistory` | Color-grouped summary — endpoint names, status codes, param names. No values, no body, no response. | Initial triage |
+| `GetRequestsByColor` | Full request + response with token truncation and cookie collapsing | Group vulnerability analysis |
+| `GetRequestByIndex` | 100% untruncated — full JWT, raw cookies, complete response | Surgical analysis / JWT attacks |
 
-- Install the extension in Burp Suite
-- Configure your Burp MCP server in the extension settings
-- Configure your MCP client to use the Burp SSE MCP server or stdio proxy
-- Interact with Burp through your client!
+### Unified Attack Tool
+`SendRequest` is the only tool that sends data to the target. It supports:
+- **Explicit injection** via `injectAt` — `"body:param"`, `"query:param"`, `"header:Name"`, `"method"`, `"path"`
+- **Marker injection** — place `{{payload}}` anywhere in the request
+- **Auto injection** — JWT/Bearer auto-routes to Authorization header; fallback to last path segment
+- **Differential analysis** — adaptive response output: size/status diff detection, body preview when uniform
+- **Delay control** — `delaySeconds` for time-based SQLi calibration
+
+### Real Baseline Timing
+Every item in history shows `[baseline: Xms]` — the real latency captured by Burp at intercept time. Used to calibrate time-based SQLi attacks against real response times, not estimated values.
+
+### Persistent Item IDs
+Uses `ProxyHttpRequestResponse.id()` — the native Burp ID that matches the `#` column in Proxy History UI and **does not reset after history clear**.
+
+### Backend Sanitization
+Automatic pipeline on all history reads:
+- JWT/Bearer tokens truncated (`eyJ...[JWT TRUNCATED]`, `Bearer [TOKEN TRUNCATED]`)
+- Cookies collapsed (`[N cookies, session=abc123de...]`)
+- SVG / base64 / ViewState replaced with `[TRUNCATED]`
+- Static extensions filtered (images, fonts, CSS, JS, media, binaries)
+- Items > 10,000 chars truncated
+
+---
+
+## Tools
+
+| Tool | Parameters | Usage |
+|:-----|:-----------|:------|
+| `GetProxyHttpHistory` | `count`, `offset` | Overview / triage — color-grouped summary |
+| `GetProxyHttpHistoryRegex` | `regex`, `count`, `offset` | Search specific content in highlighted items |
+| `GetRequestsByColor` | `colors[]`, `count`, `offset` | Full analysis of a color group |
+| `GetRequestByIndex` | `index` | Deep analysis — full token, no truncation |
+| `SendRequest` | `index`, `payloads[]?`, `numberOfRequests?`, `delaySeconds?`, `injectAt?` | Only attack tool |
+| `CreateRepeaterTab` | `index`, `tabName?`, `payload?`, `injectAt?` | Send to Repeater by index |
+| `SendToIntruder` | `index`, `tabName?`, `payload?`, `injectAt?` | Send to Intruder by index |
+| `GetProxyWebsocketHistory` | `count`, `offset` | WebSocket history |
+| `GetProxyWebsocketHistoryRegex` | `regex`, `count`, `offset` | Filter WebSocket by regex |
+| `GenerateCollaboratorPayload` | `customData?` | Generate OOB payload for SSRF/Blind/DNS *(Pro only)* |
+| `GetCollaboratorInteractions` | `payloadId?` | Query Collaborator callbacks *(Pro only)* |
+| `UrlEncode` / `UrlDecode` | `content` | URL encode/decode |
+| `Base64Encode` / `Base64Decode` | `content` | Base64 encode/decode |
+| `SetProxyInterceptState` | `intercepting: Boolean` | Toggle proxy interception |
+
+---
+
+## Workflow
+
+```
+1. Browse target with Burp intercepting
+2. Highlight interesting requests with colors in Proxy History
+   🔴 RED    — critical / high priority
+   🟧 ORANGE — interesting / needs testing  
+   🟨 YELLOW — low priority / informational
+   🟩 GREEN  — confirmed safe / baseline
+   🟦 BLUE   — authentication flows
+   🟪 MAGENTA — business logic
+   🩷 PINK   — parameters / injection points
+
+3. Connect LLM via MCP
+4. LLM reads history → groups by color → identifies attack vectors
+5. LLM presents CHECKPOINT with payloads before any request is sent
+6. You approve [Y/N] → LLM fires SendRequest → analyzes differential response
+```
+
+---
+
+## System Prompt
+
+A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structured workflow:
+
+- **Hard trigger** — first character of response is the tool call
+- **Zero-data policy** — never fabricates endpoints, CVEs or vulnerabilities
+- **Passive analysis modules** — Tech Stack, Decode & Parsing, Defensive Posture, Business Logic & PII, Technical Diagnosis, Full Attack Surface, Attack Plan
+- **Prior authorization protocol** — mandatory CHECKPOINT before every `SendRequest`
+- **Attack arsenal** — 33 vectors from SQLi to API-Specific attacks
+- **Military output format** — structured, surgical, no walls of text
+
+---
 
 ## Installation
 
 ### Prerequisites
 
-Ensure that the following prerequisites are met before building and installing the extension:
+- Java available in PATH (`java --version`)
+- `jar` command available in PATH (`jar --version`)
 
-1. **Java**: Java must be installed and available in your system's PATH. You can verify this by running `java --version` in your terminal.
-2. **jar Command**: The `jar` command must be executable and available in your system's PATH. You can verify this by running `jar --version` in your terminal. This is required for building and installing the extension.
+### Build
 
-### Building the Extension
+```bash
+git clone https://github.com/youruser/burp-mcp-ColorStrike.git
+cd burp-mcp-ColorStrike
+./gradlew embedProxyJar
+```
 
-1. **Clone the Repository**: Obtain the source code for the MCP Server Extension.
-   ```
-   git clone https://github.com/PortSwigger/mcp-server.git
-   ```
+Output: `build/libs/burp-mcp-all.jar`
 
-2. **Navigate to the Project Directory**: Move into the project's root directory.
-   ```
-   cd mcp-server
-   ```
+### Load in Burp Suite
 
-3. **Build the JAR File**: Use Gradle to build the extension.
-   ```
-   ./gradlew embedProxyJar
-   ```
+1. Extensions tab → Add
+2. Extension Type: Java
+3. Select `burp-mcp-all.jar`
+4. Click Next
 
-   This command compiles the source code and packages it into a JAR file located in `build/libs/burp-mcp-all.jar`.
+### Connect Your LLM Client
 
-### Loading the Extension into Burp Suite
-
-1. **Open Burp Suite**: Launch your Burp Suite application.
-2. **Access the Extensions Tab**: Navigate to the `Extensions` tab.
-3. **Add the Extension**:
-    - Click on `Add`.
-    - Set `Extension Type` to `Java`.
-    - Click `Select file ...` and choose the JAR file built in the previous step.
-    - Click `Next` to load the extension.
-
-Upon successful loading, the MCP Server Extension will be active within Burp Suite.
-
-## Configuration
-
-### Configuring the Extension
-Configuration for the extension is done through the Burp Suite UI in the `MCP` tab.
-- **Toggle the MCP Server**: The `Enabled` checkbox controls whether the MCP server is active.
-- **Enable config editing**: The `Enable tools that can edit your config` checkbox allows the MCP server to expose tools which can edit Burp configuration files.
-- **Advanced options**: You can configure the port and host for the MCP server. By default, it listens on `http://127.0.0.1:9876`.
-
-### Claude Desktop Client
-
-To fully utilize the MCP Server Extension with Claude, you need to configure your Claude client settings appropriately.
-The extension has an installer which will automatically configure the client settings for you.
-
-1. Currently, Claude Desktop only support STDIO MCP Servers
-   for the service it needs.
-   This approach isn't ideal for desktop apps like Burp, so instead, Claude will start a proxy server that points to the
-   Burp instance,  
-   which hosts a web server at a known port (`localhost:9876`).
-
-2. **Configure Claude to use the Burp MCP server**  
-   You can do this in one of two ways:
-
-    - **Option 1: Run the installer from the extension**
-      This will add the Burp MCP server to the Claude Desktop config.
-
-    - **Option 2: Manually edit the config file**  
-      Open the file located at `~/Library/Application Support/Claude/claude_desktop_config.json`,
-      and replace or update it with the following:
-      ```json
-      {
-        "mcpServers": {
-          "burp": {
-            "command": "<path to Java executable packaged with Burp>",
-            "args": [
-                "-jar",
-                "/path/to/mcp/proxy/jar/mcp-proxy-all.jar",
-                "--sse-url",
-                "<your Burp MCP server URL configured in the extension>"
-            ]
-          }
-        }
-      }
-      ```
-
-3. **Restart Claude Desktop** - assuming Burp is running with the extension loaded.
-
-## Manual installations
-If you want to install the MCP server manually you can either use the extension's SSE server directly or the packaged
-Stdio proxy server.
-
-### SSE MCP Server
-In order to use the SSE server directly you can just provide the url for the server in your client's configuration. Depending
-on your client and your configuration in the extension this may be with or without the `/sse` path.
+**SSE (direct):**
 ```
 http://127.0.0.1:9876
 ```
-or
+
+**Stdio proxy (Claude Desktop):**
+```json
+{
+  "mcpServers": {
+    "burp": {
+      "command": "<path to Java packaged with Burp>",
+      "args": [
+        "-jar",
+        "/path/to/mcp-proxy-all.jar",
+        "--sse-url",
+        "http://127.0.0.1:9876"
+      ]
+    }
+  }
+}
 ```
-http://127.0.0.1:9876/sse
-```
 
-### Stdio MCP Proxy Server
-The source code for the proxy server can be found here: [MCP Proxy Server](https://github.com/PortSwigger/mcp-proxy)
+---
 
-In order to support MCP Clients which only support Stdio MCP Servers, the extension comes packaged with a proxy server for
-passing requests to the SSE MCP server extension.
+## Configuration
 
-If you want to use the Stdio proxy server you can use the extension's installer option to extract the proxy server jar.
-Once you have the jar you can add the following command and args to your client configuration:
-```
-/path/to/packaged/burp/java -jar /path/to/proxy/jar/mcp-proxy-all.jar --sse-url http://127.0.0.1:9876
-```
+In the **MCP tab** within Burp Suite:
 
-### Creating / modifying tools
+- **Enabled** — toggle the MCP server on/off
+- **Enable tools that can edit your config** — exposes config editing tools
+- **Host / Port** — default `127.0.0.1:9876`
 
-Tools are defined in `src/main/kotlin/net/portswigger/mcp/tools/Tools.kt`. To define new tools, create a new serializable
-data class with the required parameters which will come from the LLM.
+---
 
-The tool name is auto-derived from its parameters data class. A description is also needed for the LLM. You can return
-a string (or richer PromptMessageContents) to provide data back to the LLM.
+## Key Differences from PortSwigger/mcp-server
 
-Extend the Paginated interface to add auto-pagination support.
+| Feature | Original | ColorStrike |
+|:--------|:---------|:------------|
+| History filter | Scope-based | Highlight color (no scope required) |
+| Item indexing | `mapIndexed` position | Native `ProxyHttpRequestResponse.id()` — persistent |
+| JWT handling | Truncated everywhere | Full token via `GetRequestByIndex` |
+| Attack tool | `SendRequest` basic | Unified injection engine with 5 injection modes |
+| Timing | Not exposed | `[baseline: Xms]` on every item |
+| Differential analysis | None | Size/status diff detection + body preview |
+| System prompt | None | `prompt_v20.md` — 33 attack vectors, checkpoint protocol |
+| Scanner issues | Included | Removed — manual workflow only |
+
+---
+
+## Credits
+
+Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server).  
+MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
