@@ -229,6 +229,6 @@ A full step-by-step walkthrough of a real testing session — from triage to SQL
 ---
 
 ## Credits
-Froyd [Github](https://github.com/CircuitSoul).  
-Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server).  
+Froyd [Github](https://github.com/CircuitSoul)  
+Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server)  
 MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
