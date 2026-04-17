@@ -160,7 +160,17 @@ A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structu
 
 ## Installation
 
-### Prerequisites
+### Option 1 — Download Pre-built JAR
+
+Download the latest release directly:
+
+```
+https://github.com/geozin/burp-mcp-colorstrike/releases/download/v1.0.0/burp-mcp-ColorStrike-v1.0.0.jar
+```
+
+### Option 2 — Build from Source
+
+#### Prerequisites
 
 - Java available in PATH (`java --version`)
 - `jar` command available in PATH (`jar --version`)
