@@ -1,5 +1,7 @@
 # burp-mcp-ColorStrike — Usage Guide
 
+> **Version:** v1.0.1 | **File:** `burp-mcp-ColorStrike-v1.0.1.jar` | **System Prompt:** `prompt_v20.md`
+
 A step-by-step walkthrough of a real testing session using the color-based triage workflow.
 
 ---
