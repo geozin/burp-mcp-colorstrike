@@ -108,8 +108,7 @@ private data class IndexedProxyItem(
 /**
  * Returns the filtered HTTP history applying ALL criteria:
  *   1. Must have highlight (any color other than NONE) — items without highlight are ignored
- *   2. Must be within the project scope
- *   3. URL must not be a static extension
+ *   2. URL must not be a static extension
  *
  * burpIndex from .id() — real Burp ID, persistent across history clears.
  * Returned in reverse order (most recent first), preserving the original burpIndex.
@@ -705,6 +704,7 @@ private fun executeSendRequest(
         val headersLog: String
     )
     val rawResults = mutableListOf<ReqResult>()
+    var sseDetected: String? = null
 
     val firstPayload  = payloads?.firstOrNull()
     val injectionMode = when {
@@ -816,7 +816,18 @@ private fun executeSendRequest(
             val request  = HttpRequest.http2Request(
                 HttpService.httpService(hostname, port, useHttps), headerList, body)
             val t0       = System.currentTimeMillis()
-            val reqRes   = api.http().sendRequest(request, HttpMode.HTTP_2)
+            val reqRes   = try {
+                api.http().sendRequest(request, HttpMode.HTTP_2)
+            } catch (e: Exception) {
+                if (e.message?.contains("stream", ignoreCase = true) == true ||
+                    e.message?.contains("event-stream", ignoreCase = true) == true) {
+                    sseDetected = "⚠️ SSE endpoint detected — server returned Content-Type: text/event-stream\n" +
+                        "SendRequest cannot consume persistent streams via the Burp API.\n" +
+                        "Use CreateRepeaterTab to inspect this endpoint manually in Burp Repeater."
+                    break
+                }
+                throw e
+            }
             val latency  = System.currentTimeMillis() - t0
             val response = reqRes?.response()
 
@@ -902,7 +913,18 @@ private fun executeSendRequest(
             val request  = HttpRequest.httpRequest(
                 HttpService.httpService(hostname, port, useHttps), fixedContent)
             val t0       = System.currentTimeMillis()
-            val reqRes   = api.http().sendRequest(request)
+            val reqRes   = try {
+                api.http().sendRequest(request)
+            } catch (e: Exception) {
+                if (e.message?.contains("stream", ignoreCase = true) == true ||
+                    e.message?.contains("event-stream", ignoreCase = true) == true) {
+                    sseDetected = "⚠️ SSE endpoint detected — server returned Content-Type: text/event-stream\n" +
+                        "SendRequest cannot consume persistent streams via the Burp API.\n" +
+                        "Use CreateRepeaterTab to inspect this endpoint manually in Burp Repeater."
+                    break
+                }
+                throw e
+            }
             val latency  = System.currentTimeMillis() - t0
             val response = reqRes?.response()
 
@@ -920,6 +942,9 @@ private fun executeSendRequest(
             rawResults.add(ReqResult(i, currentPayload, status, size, latency, preview, hdrs))
         }
     }
+
+    // Return SSE message if detected during loop
+    if (sseDetected != null) return sseDetected!!
 
     val delayDisplay = if (delaySeconds == 0.0) "no delay" else "${delaySeconds}s"
 
