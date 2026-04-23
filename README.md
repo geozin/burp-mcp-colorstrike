@@ -1,6 +1,12 @@
 # burp-mcp-ColorStrike
 
-> A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads.
+![Version](https://img.shields.io/badge/version-v1.0.1-blue)
+![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Professional%20%7C%20Community-orange)
+![License](https://img.shields.io/badge/license-GPL--3.0-green)
+![Java](https://img.shields.io/badge/Java-17%2B-red)
+![Fork](https://img.shields.io/badge/fork-PortSwigger%2Fmcp--server-lightgrey)
+
+> A Burp Suite MCP extension that enables AI-driven security analysis and offensive testing through a color-based triage workflow. Highlight requests in Burp Proxy History, then let the LLM analyze traffic by color group, identify attack vectors, and execute targeted payloads — all without leaving your chat interface.
 
 A fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server) with a focus on manual penetration testing workflows.
 
@@ -165,31 +171,30 @@ A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structu
 Download the latest release directly:
 
 ```
-https://github.com/geozin/burp-mcp-colorstrike/releases/download/v1.0.0/burp-mcp-ColorStrike-v1.0.0.jar
+https://github.com/geozin/burp-mcp-colorstrike/releases/download/v1.0.1/burp-mcp-ColorStrike-all.jar
 ```
 
 ### Option 2 — Build from Source
 
 #### Prerequisites
 
-- Java available in PATH (`java --version`)
-- `jar` command available in PATH (`jar --version`)
+- Java 17+ available in PATH (`java --version`)
 
-### Build
+#### Build
 
 ```bash
 git clone https://github.com/geozin/burp-mcp-ColorStrike.git
 cd burp-mcp-ColorStrike
-./gradlew build -x test
+./gradlew clean embedProxyJar
 ```
 
-Output: `build/libs/burp-mcp-all.jar`
+Output: `build/libs/burp-mcp-ColorStrike-all.jar`
 
 ### Load in Burp Suite
 
 1. Extensions tab → Add
 2. Extension Type: Java
-3. Select `burp-mcp-all.jar`
+3. Select `burp-mcp-ColorStrike-all.jar`
 4. Click Next
 
 ### Connect Your LLM Client
@@ -200,6 +205,9 @@ http://127.0.0.1:9876
 ```
 
 **Stdio proxy (Claude Desktop):**
+
+Use the **Extract Proxy JAR** button in the  tab inside Burp to extract the proxy JAR, then configure:
+
 ```json
 {
   "mcpServers": {
@@ -207,7 +215,7 @@ http://127.0.0.1:9876
       "command": "<path to Java packaged with Burp>",
       "args": [
         "-jar",
-        "/path/to/mcp-proxy-all.jar",
+        "<path to extracted mcp-proxy-all.jar>",
         "--sse-url",
         "http://127.0.0.1:9876"
       ]
@@ -251,6 +259,5 @@ A full step-by-step walkthrough of a real testing session — from triage to SQL
 
 ## Credits
 
-Froyd [CircuitSoul](https://github.com/CircuitSoul)  
 Fork of [PortSwigger/mcp-server](https://github.com/PortSwigger/mcp-server)  
 MCP protocol: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
