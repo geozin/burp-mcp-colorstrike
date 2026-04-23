@@ -1,4 +1,7 @@
 import java.time.Instant
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 abstract class EmbedProxyJarTask : DefaultTask() {
     @get:InputFile
@@ -6,9 +9,6 @@ abstract class EmbedProxyJarTask : DefaultTask() {
 
     @get:InputDirectory
     abstract val projectDir: DirectoryProperty
-
-    @get:Inject
-    abstract val execOperations: ExecOperations
 
     @TaskAction
     fun embedJar() {
@@ -20,10 +20,29 @@ abstract class EmbedProxyJarTask : DefaultTask() {
             throw GradleException("Proxy JAR not found at: ${proxyJarFile.absolutePath}")
         }
 
-        execOperations.exec {
-            workingDir(projectDir.get().asFile)
-            commandLine("jar", "uf", shadowJar.absolutePath, "-C", libsDir.absolutePath, proxyJarFile.name)
+        // Create a temp file to write the new JAR
+        val tempFile = File(shadowJar.parent, shadowJar.name + ".tmp")
+
+        ZipOutputStream(tempFile.outputStream().buffered()).use { zos ->
+            // Copy existing entries from shadow JAR
+            ZipInputStream(shadowJar.inputStream().buffered()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    zos.putNextEntry(ZipEntry(entry.name))
+                    zis.copyTo(zos)
+                    zos.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+            // Add proxy JAR
+            zos.putNextEntry(ZipEntry(proxyJarFile.name))
+            proxyJarFile.inputStream().buffered().use { it.copyTo(zos) }
+            zos.closeEntry()
         }
+
+        // Replace original with temp
+        shadowJar.delete()
+        tempFile.renameTo(shadowJar)
 
         logger.lifecycle("Embedded proxy JAR into ${shadowJar.name}")
     }
@@ -97,6 +116,8 @@ tasks {
 
     shadowJar {
         archiveClassifier.set("")
+        archiveBaseName.set("burp-mcp-ColorStrike")
+        archiveVersion.set("v${project.version}")
         mergeServiceFiles()
 
         manifest {
@@ -104,7 +125,7 @@ tasks {
                 mapOf(
                     "Implementation-Title" to project.name,
                     "Implementation-Version" to project.version,
-                    "Implementation-Vendor" to "PortSwigger",
+                    "Implementation-Vendor" to "geozin",
                     "Built-By" to System.getProperty("user.name"),
                     "Built-Date" to Instant.now().toString(),
                     "Built-JDK" to "${System.getProperty("java.version")} (${System.getProperty("java.vendor")} ${
