@@ -9,11 +9,15 @@ import net.portswigger.mcp.Swing
 import net.portswigger.mcp.config.components.*
 import net.portswigger.mcp.providers.Provider
 import java.awt.BorderLayout
+import java.awt.Color
 import java.awt.Component.CENTER_ALIGNMENT
+import java.awt.Font
 import java.awt.GridBagLayout
 import javax.swing.*
 import javax.swing.Box.*
 import javax.swing.JOptionPane.ERROR_MESSAGE
+import javax.swing.text.SimpleAttributeSet
+import javax.swing.text.StyleConstants
 
 class ConfigUi(private val config: McpConfig, private val providers: List<Provider>) {
 
@@ -171,11 +175,19 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         val leftPanel = JPanel(GridBagLayout())
 
         val headerBox = createVerticalBox().apply {
-            add(JLabel("Burp MCP Server").apply {
+            add(JLabel("ColorStrike").apply {
                 font = Design.Typography.headlineMedium
                 foreground = Design.Colors.onSurface
                 alignmentX = CENTER_ALIGNMENT
             })
+            add(createVerticalStrut(Design.Spacing.SM / 2))
+            add(JLabel("Burp MCP Server · Color-Based Triage & Attack Toolkit").apply {
+                font = Design.Typography.labelMedium
+                foreground = Design.Colors.onSurfaceVariant
+                alignmentX = CENTER_ALIGNMENT
+            })
+            add(createVerticalStrut(Design.Spacing.MD))
+            add(createPrismAsciiArea())
             add(createVerticalStrut(Design.Spacing.MD))
             add(JLabel("Burp MCP Server exposes Burp tooling to AI clients.").apply {
                 font = Design.Typography.bodyLarge
@@ -224,5 +236,58 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
         val columnsPanel = ResponsiveColumnsPanel(leftPanel, rightPanel)
         panel.add(columnsPanel, BorderLayout.CENTER)
+    }
+
+    /**
+     * Renders PRISM_ASCII as a non-editable JTextPane with each ray colored to match its
+     * label (R/O/Y/G/B/V), rather than a single flat color — the prism effect only reads as
+     * a prism if the rays are actually the colors they're labeled, same idea as Burp's own
+     * highlight-color palette this extension is built around.
+     */
+    private fun createPrismAsciiArea(): JTextPane {
+        val rayColors = mapOf(
+            'R' to Color(0xE0, 0x3A, 0x3A), // red
+            'O' to Color(0xE0, 0x8A, 0x2A), // orange
+            'Y' to Color(0xC9, 0xA8, 0x1E), // yellow
+            'G' to Color(0x3A, 0xA0, 0x5A), // green
+            'B' to Color(0x3A, 0x7A, 0xD0), // blue
+            'V' to Color(0x8A, 0x4A, 0xC9)  // violet
+        )
+        val neutral = Design.Colors.onSurfaceVariant
+
+        return JTextPane().apply {
+            isOpaque = false
+            isEditable = false
+            isFocusable = false
+            alignmentX = CENTER_ALIGNMENT
+            font = Font("Monospaced", Font.BOLD, 12)
+            border = BorderFactory.createEmptyBorder(6, 12, 6, 12)
+
+            val neutralStyle = SimpleAttributeSet().apply { StyleConstants.setForeground(this, neutral) }
+            PRISM_ASCII.trimIndent().lines().forEach { line ->
+                val rayChar = line.trimEnd().lastOrNull()?.takeIf { it in rayColors }
+                val style = rayChar?.let { c ->
+                    SimpleAttributeSet().apply { StyleConstants.setForeground(this, rayColors.getValue(c)) }
+                } ?: neutralStyle
+                document.insertString(document.length, "$line\n", style)
+            }
+        }
+    }
+
+    companion object {
+        // Prism: white light in from the left, split into six labeled color rays —
+        // ColorStrike's own highlight-color triage, drawn as light instead of a legend.
+        private const val PRISM_ASCII = """
+                                  ◢▲◣
+            ─────────────────── ◢████◣
+                                █████████▶ R
+                                █████████▶ O
+                                █████████▶ Y
+                                █████████▶ G
+                                █████████▶ B
+                                █████████▶ V
+                                 ◥██████◤
+                                   ◥██◤
+                      [ COLORSTRIKE :: MCP ]"""
     }
 }
