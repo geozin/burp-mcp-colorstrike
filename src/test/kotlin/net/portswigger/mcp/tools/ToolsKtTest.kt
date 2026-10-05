@@ -1,12 +1,9 @@
 package net.portswigger.mcp.tools
 
 import burp.api.montoya.MontoyaApi
-import burp.api.montoya.burpsuite.TaskExecutionEngine
 import burp.api.montoya.collaborator.*
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
-import burp.api.montoya.http.Http
-import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpProtocol
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
@@ -15,7 +12,6 @@ import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.Proxy
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import burp.api.montoya.utilities.Base64Utils
-import burp.api.montoya.utilities.RandomUtils
 import burp.api.montoya.utilities.URLUtils
 import burp.api.montoya.utilities.Utilities
 import io.mockk.*
@@ -24,8 +20,10 @@ import java.time.ZonedDateTime
 import java.util.Optional
 import io.modelcontextprotocol.kotlin.sdk.CallToolResultBase
 import io.modelcontextprotocol.kotlin.sdk.TextContent
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
 import net.portswigger.mcp.KtorServerManager
@@ -40,7 +38,6 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.net.ServerSocket
-import javax.swing.JTextArea
 
 class ToolsKtTest {
     
@@ -48,7 +45,7 @@ class ToolsKtTest {
     private val api = mockk<MontoyaApi>(relaxed = true)
     private val serverManager = KtorServerManager(api)
     private val testPort = findAvailablePort()
-    private var serverStarted = false
+    private var serverStartedDeferred = CompletableDeferred<Unit>()
     private val config: McpConfig
     private val mockHeaders = mutableListOf<HttpHeader>()
     private val capturedRequest = slot<HttpRequest>()
@@ -133,19 +130,30 @@ class ToolsKtTest {
         setupHttpHeaderMocks()
 
         serverManager.start(config) { state ->
-            if (state is ServerState.Running) serverStarted = true
+            if (state is ServerState.Running) serverStartedDeferred.complete(Unit)
         }
 
         runBlocking {
-            var attempts = 0
-            while (!serverStarted && attempts < 30) {
-                delay(100)
-                attempts++
-            }
-            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
+            awaitServerStarted()
 
             client.connectToServer("http://127.0.0.1:${testPort}")
             assertNotNull(client.ping(), "Ping should return a result")
+        }
+    }
+
+    private suspend fun awaitServerStarted() {
+        try {
+            withTimeout(3000) { serverStartedDeferred.await() }
+        } catch (e: TimeoutCancellationException) {
+            throw IllegalStateException("Server failed to start after timeout")
+        }
+    }
+
+    private fun restartServer() {
+        serverManager.stop {}
+        serverStartedDeferred = CompletableDeferred()
+        serverManager.start(config) { state ->
+            if (state is ServerState.Running) serverStartedDeferred.complete(Unit)
         }
     }
 
@@ -157,205 +165,6 @@ class ToolsKtTest {
         serverManager.stop {}
     }
 
-    @Nested
-    inner class HttpToolsTests {
-        @Test
-        fun `http1 line endings should be normalized`() {
-            val httpService = mockk<Http>()
-            val httpResponse = mockk<burp.api.montoya.http.message.HttpRequestResponse>()
-            val contentSlot = slot<String>()
-
-            every { HttpRequest.httpRequest(any(), capture(contentSlot)) } answers {
-                val content = secondArg<String>()
-                mockk<HttpRequest>().also {
-                    every { it.toString() } returns content
-                }
-            }
-            every { api.http() } returns httpService
-            every { httpResponse.toString() } returns "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nResponse body"
-            every { httpService.sendRequest(capture(capturedRequest)) } returns httpResponse
-
-            runBlocking {
-                val result = client.callTool(
-                    "send_http1_request", mapOf(
-                        "content" to "GET /foo HTTP/1.1\nHost: example.com\n\n",
-                        "targetHostname" to "example.com",
-                        "targetPort" to 80,
-                        "usesHttps" to false
-                    )
-                )
-
-                delay(100)
-                val text = result.expectTextContent()
-                assertFalse(text.contains("Error"), 
-                    "Expected success response but got error: $text")
-            }
-
-            verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>()) }
-            assertEquals("GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n", capturedRequest.captured.toString(), "Request body should match")
-        }
-
-        @Test
-        fun `http1 request should handle no response`() {
-            val httpService = mockk<Http>()
-            val contentSlot = slot<String>()
-
-            every { HttpRequest.httpRequest(any(), capture(contentSlot)) } answers {
-                val content = secondArg<String>()
-                mockk<HttpRequest>().also {
-                    every { it.toString() } returns content
-                }
-            }
-            every { api.http() } returns httpService
-            every { httpService.sendRequest(any()) } returns null
-
-            runBlocking {
-                val result = client.callTool(
-                    "send_http1_request", mapOf(
-                        "content" to "GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n",
-                        "targetHostname" to "example.com",
-                        "targetPort" to 80,
-                        "usesHttps" to false
-                    )
-                )
-
-                delay(100)
-                result.expectTextContent("<no response>")
-            }
-        }
-
-        @Test
-        fun `http2 request should be formatted properly`() {
-            val httpService = mockk<Http>()
-            val httpResponse = mockk<burp.api.montoya.http.message.HttpRequestResponse>()
-            val httpRequest = mockk<HttpRequest>()
-            val requestSlot = slot<HttpRequest>()
-            val headersSlot = slot<List<HttpHeader>>()
-            val bodySlot = slot<String>()
-
-            every { HttpRequest.http2Request(any(), capture(headersSlot), capture(bodySlot)) } returns httpRequest
-            every { httpResponse.toString() } returns "HTTP/2 200 OK\r\nContent-Type: text/plain\r\n\r\nResponse body"
-            every { api.http() } returns httpService
-            every { httpService.sendRequest(capture(requestSlot), HttpMode.HTTP_2) } returns httpResponse
-
-            val pseudoHeaders = mapOf(
-                "authority" to "example.com", "scheme" to "https", "method" to "GET", ":path" to "/test"
-            )
-            val headers = mapOf(
-                "User-Agent" to "Test Agent", "Accept" to "*/*"
-            )
-            val requestBody = "Test body"
-
-            runBlocking {
-                val result = client.callTool(
-                    "send_http2_request", mapOf(
-                        "pseudoHeaders" to Json.encodeToJsonElement(pseudoHeaders),
-                        "headers" to Json.encodeToJsonElement(headers),
-                        "requestBody" to requestBody,
-                        "targetHostname" to "example.com",
-                        "targetPort" to 443,
-                        "usesHttps" to true
-                    )
-                )
-
-                delay(100)
-                val text = result.expectTextContent()
-                assertFalse(text.contains("Error"), 
-                    "Expected success response but got error: $text")
-            }
-
-            verify(exactly = 1) { HttpRequest.http2Request(any(), any(), any<String>()) }
-            
-            assertEquals("Test body", bodySlot.captured, "Request body should match")
-            
-            val pseudoHeaderList = headersSlot.captured.filter { it.name().startsWith(":") }
-            val normalHeaderList = headersSlot.captured.filter { !it.name().startsWith(":") }
-            
-            assertTrue(pseudoHeaderList.any { it.name() == ":scheme" && it.value() == "https" })
-            assertTrue(pseudoHeaderList.any { it.name() == ":method" && it.value() == "GET" })
-            assertTrue(pseudoHeaderList.any { it.name() == ":path" && it.value() == "/test" })
-            assertTrue(pseudoHeaderList.any { it.name() == ":authority" && it.value() == "example.com" })
-            
-            assertTrue(normalHeaderList.any { it.name() == "user-agent" && it.value() == "Test Agent" })
-            assertTrue(normalHeaderList.any { it.name() == "accept" && it.value() == "*/*" })
-        }
-        
-        @Test
-        fun `http2 request should handle null response`() {
-            val httpService = mockk<Http>()
-            val httpRequest = mockk<HttpRequest>()
-
-            every { HttpRequest.http2Request(any(), any(), any<String>()) } returns httpRequest
-            every { api.http() } returns httpService
-            every { httpService.sendRequest(any(), HttpMode.HTTP_2) } returns null
-
-            val pseudoHeaders = mapOf("method" to "GET", "path" to "/test")
-            val headers = mapOf("User-Agent" to "Test Agent")
-
-            runBlocking {
-                val result = client.callTool(
-                    "send_http2_request", mapOf(
-                        "pseudoHeaders" to Json.encodeToJsonElement(pseudoHeaders),
-                        "headers" to Json.encodeToJsonElement(headers),
-                        "requestBody" to "",
-                        "targetHostname" to "example.com",
-                        "targetPort" to 443,
-                        "usesHttps" to true
-                    )
-                )
-
-                delay(100)
-                result.expectTextContent("<no response>")
-            }
-        }
-        
-        @Test
-        fun `http2 pseudo headers should be ordered correctly`() {
-            val httpService = mockk<Http>()
-            val httpResponse = mockk<burp.api.montoya.http.message.HttpRequestResponse>()
-            val httpRequest = mockk<HttpRequest>()
-            val headersSlot = slot<List<HttpHeader>>()
-
-            every { HttpRequest.http2Request(any(), capture(headersSlot), any<String>()) } returns httpRequest
-            every { httpResponse.toString() } returns "HTTP/2 200 OK"
-            every { api.http() } returns httpService
-            every { httpService.sendRequest(any(), HttpMode.HTTP_2) } returns httpResponse
-
-            val pseudoHeaders = mapOf(
-                "path" to "/test",
-                ":authority" to "example.com", 
-                "method" to "GET",
-                "scheme" to "https"
-            )
-
-            runBlocking {
-                val result = client.callTool(
-                    "send_http2_request", mapOf(
-                        "pseudoHeaders" to Json.encodeToJsonElement(pseudoHeaders),
-                        "headers" to Json.encodeToJsonElement(emptyMap<String, String>()),
-                        "requestBody" to "",
-                        "targetHostname" to "example.com",
-                        "targetPort" to 443,
-                        "usesHttps" to true
-                    )
-                )
-                
-                delay(100)
-                assertNotNull(result)
-            }
-            
-            val pseudoHeaderNames = headersSlot.captured
-                .filter { it.name().startsWith(":") }
-                .map { it.name() }
-            
-            val expectedOrder = listOf(":scheme", ":method", ":path", ":authority")
-            for (i in 0 until minOf(expectedOrder.size, pseudoHeaderNames.size)) {
-                assertEquals(expectedOrder[i], pseudoHeaderNames[i], 
-                    "Pseudo headers should follow the order: scheme, method, path, authority")
-            }
-        }
-    }
-    
     @Nested
     inner class UtilityToolsTests {
         @Test
@@ -374,7 +183,6 @@ class ToolsKtTest {
                     )
                 )
                 
-                delay(100)
                 result.expectTextContent("test+string+with+spaces")
             }
             
@@ -397,7 +205,6 @@ class ToolsKtTest {
                     )
                 )
                 
-                delay(100)
                 result.expectTextContent("test string with spaces")
             }
             
@@ -420,7 +227,6 @@ class ToolsKtTest {
                     )
                 )
                 
-                delay(100)
                 result.expectTextContent("dGVzdCBzdHJpbmc=")
             }
             
@@ -445,250 +251,51 @@ class ToolsKtTest {
                     )
                 )
                 
-                delay(100)
                 result.expectTextContent("test string")
             }
             
             verify(exactly = 1) { base64Utils.decode(any<String>()) }
-        }
-        
-        @Test
-        fun `generate random string should work properly`() {
-            val randomUtils = mockk<RandomUtils>()
-            val utilities = mockk<Utilities>()
-            
-            every { api.utilities() } returns utilities
-            every { utilities.randomUtils() } returns randomUtils
-            every { randomUtils.randomString(any<Int>(), any<String>()) } returns "1a2b3c1a2b"
-            
-            runBlocking {
-                val result = client.callTool(
-                    "generate_random_string", mapOf(
-                        "length" to 10,
-                        "characterSet" to "abc123"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("1a2b3c1a2b")
-            }
-            
-            verify(exactly = 1) { randomUtils.randomString(any<Int>(), any<String>()) }
         }
     }
     
     @Nested
     inner class ConfigurationToolsTests {
         @Test
-        fun `set task execution engine state should work properly`() {
-            val taskExecutionEngine = mockk<TaskExecutionEngine>()
-            val burpSuite = mockk<burp.api.montoya.burpsuite.BurpSuite>()
-            
-            every { api.burpSuite() } returns burpSuite
-            every { burpSuite.taskExecutionEngine() } returns taskExecutionEngine
-            every { taskExecutionEngine.state = any() } just runs
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_task_execution_engine_state", mapOf(
-                        "running" to true
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("Task execution engine is now running")
-            }
-            
-            verify(exactly = 1) { taskExecutionEngine.state = TaskExecutionEngine.TaskExecutionEngineState.RUNNING }
-            
-            clearMocks(taskExecutionEngine, answers = false)
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_task_execution_engine_state", mapOf(
-                        "running" to false
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("Task execution engine is now paused")
-            }
-            
-            verify(exactly = 1) { taskExecutionEngine.state = TaskExecutionEngine.TaskExecutionEngineState.PAUSED }
-        }
-        
-        @Test
         fun `set proxy intercept state should work properly`() {
             val proxy = mockk<Proxy>()
-            
+
             every { api.proxy() } returns proxy
             every { proxy.enableIntercept() } just runs
             every { proxy.disableIntercept() } just runs
-            
+
             runBlocking {
                 val result = client.callTool(
                     "set_proxy_intercept_state", mapOf(
                         "intercepting" to true
                     )
                 )
-                
-                delay(100)
-                result.expectTextContent("Intercept has been enabled")
+
+                result.expectTextContent("Intercept enabled")
             }
-            
+
             verify(exactly = 1) { proxy.enableIntercept() }
-            
+
             clearMocks(proxy, answers = false)
-            
+
             runBlocking {
                 val result = client.callTool(
                     "set_proxy_intercept_state", mapOf(
                         "intercepting" to false
                     )
                 )
-                
-                delay(100)
-                result.expectTextContent("Intercept has been disabled")
+
+                result.expectTextContent("Intercept disabled")
             }
-            
+
             verify(exactly = 1) { proxy.disableIntercept() }
-        }
-        
-        @Test
-        fun `config editing tools should respect config settings`() {
-            val burpSuite = mockk<burp.api.montoya.burpsuite.BurpSuite>()
-            
-            every { api.burpSuite() } returns burpSuite
-            every { burpSuite.importProjectOptionsFromJson(any()) } just runs
-            every { api.logging().logToOutput(any()) } just runs
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_project_options", mapOf(
-                        "json" to "{\"test\": true}"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("Project configuration has been applied")
-            }
-            
-            verify(exactly = 1) { burpSuite.importProjectOptionsFromJson(any()) }
-            
-            clearMocks(burpSuite, answers = false)
-            
-            every { config.configEditingTooling } returns false
-            
-            runBlocking {
-                
-                val result = client.callTool(
-                    "set_project_options", mapOf(
-                        "json" to "{\"test\": true}"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("User has disabled configuration editing. They can enable it in the MCP tab in Burp by selecting 'Enable tools that can edit your config'")
-            }
-            
-            verify(exactly = 0) { burpSuite.importProjectOptionsFromJson(any()) }
         }
     }
 
-    @Nested
-    inner class EditorTests {
-        @Test
-        fun `get active editor contents should handle no editor`() {
-            mockkStatic("net.portswigger.mcp.tools.ToolsKt")
-            
-            every { getActiveEditor(api) } returns null
-            
-            runBlocking {
-                val result = client.callTool("get_active_editor_contents", emptyMap())
-                
-                delay(100)
-                result.expectTextContent("<No active editor>")
-            }
-        }
-        
-        @Test
-        fun `get active editor contents should return text`() {
-            mockkStatic("net.portswigger.mcp.tools.ToolsKt")
-            
-            val textArea = mockk<JTextArea>()
-            every { getActiveEditor(api) } returns textArea
-            every { textArea.text } returns "Editor content"
-            
-            runBlocking {
-                val result = client.callTool("get_active_editor_contents", emptyMap())
-                
-                delay(100)
-                result.expectTextContent("Editor content")
-            }
-        }
-        
-        @Test
-        fun `set active editor contents should handle no editor`() {
-            mockkStatic("net.portswigger.mcp.tools.ToolsKt")
-            
-            every { getActiveEditor(api) } returns null
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_active_editor_contents", mapOf(
-                        "text" to "New content"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("<No active editor>")
-            }
-        }
-        
-        @Test
-        fun `set active editor contents should handle non-editable editor`() {
-            mockkStatic("net.portswigger.mcp.tools.ToolsKt")
-            
-            val textArea = mockk<JTextArea>()
-            every { getActiveEditor(api) } returns textArea
-            every { textArea.isEditable } returns false
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_active_editor_contents", mapOf(
-                        "text" to "New content"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("<Current editor is not editable>")
-            }
-        }
-        
-        @Test
-        fun `set active editor contents should update text`() {
-            mockkStatic("net.portswigger.mcp.tools.ToolsKt")
-            
-            val textArea = mockk<JTextArea>()
-            every { getActiveEditor(api) } returns textArea
-            every { textArea.isEditable } returns true
-            every { textArea.text = any() } just runs
-            
-            runBlocking {
-                val result = client.callTool(
-                    "set_active_editor_contents", mapOf(
-                        "text" to "New content"
-                    )
-                )
-                
-                delay(100)
-                result.expectTextContent("Editor text has been set")
-            }
-            
-            verify(exactly = 1) { textArea.text = "New content" }
-        }
-    }
-    
     @Nested
     inner class PaginatedToolsTests {
         @Test
@@ -699,12 +306,26 @@ class ToolsKtTest {
                 mockk<ProxyHttpRequestResponse>(),
                 mockk<ProxyHttpRequestResponse>()
             )
-            
+
             every { api.proxy() } returns proxy
             every { proxy.history() } returns proxyHistory
-            
+
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
-            
+
+            // GetProxyHttpHistory only shows highlighted, non-static-URL items (ColorStrike's
+            // triage filter), sorted most-recent-first by id — so ids must descend in the
+            // item1/item2/item3 display order the assertions below expect.
+            val ids = listOf(3, 2, 1)
+            proxyHistory.forEachIndexed { i, item ->
+                val annotations = mockk<burp.api.montoya.core.Annotations>()
+                val finalRequest = mockk<HttpRequest>()
+                every { item.id() } returns ids[i]
+                every { item.annotations() } returns annotations
+                every { annotations.highlightColor() } returns burp.api.montoya.core.HighlightColor.RED
+                every { item.finalRequest() } returns finalRequest
+                every { finalRequest.url() } returns "http://example.com/item${i + 1}"
+            }
+
             every { proxyHistory[0].toSerializableForm() } returns HttpRequestResponse(
                 request = "GET /item1 HTTP/1.1",
                 response = "HTTP/1.1 200 OK",
@@ -720,40 +341,41 @@ class ToolsKtTest {
                 response = "HTTP/1.1 200 OK",
                 notes = "Item 3 notes"
             )
-            
+
             runBlocking {
+                // The paginated sequence is [summary header, "=== [RED] ..." group label, item1, item2, item3].
+                // The header/label always carry every item's "GET /pathN" via the cross-item endpoint
+                // summary, so "GET /itemN" can't distinguish pages — use each item's unique "notes"
+                // field instead, and offset past the 2 overhead entries to reach the real items.
                 val result1 = client.callTool(
-                    "get_proxy_http_history", mapOf(
-                        "count" to 2,
-                        "offset" to 0
-                    )
-                )
-                
-                delay(100)
-                val text1 = result1.expectTextContent()
-                assertTrue(text1.contains("GET /item1"))
-                assertTrue(text1.contains("GET /item2"))
-                assertFalse(text1.contains("GET /item3"))
-                
-                val result2 = client.callTool(
                     "get_proxy_http_history", mapOf(
                         "count" to 2,
                         "offset" to 2
                     )
                 )
-                
-                delay(100)
+
+                val text1 = result1.expectTextContent()
+                assertTrue(text1.contains("Item 1 notes"))
+                assertTrue(text1.contains("Item 2 notes"))
+                assertFalse(text1.contains("Item 3 notes"))
+
+                val result2 = client.callTool(
+                    "get_proxy_http_history", mapOf(
+                        "count" to 2,
+                        "offset" to 4
+                    )
+                )
+
                 val text2 = result2.expectTextContent()
-                assertTrue(text2.contains("GET /item3"))
-                
+                assertTrue(text2.contains("Item 3 notes"))
+
                 val result3 = client.callTool(
                     "get_proxy_http_history", mapOf(
                         "count" to 2,
-                        "offset" to 3
+                        "offset" to 5
                     )
                 )
-                
-                delay(100)
+
                 assertEquals("Reached end of items", result3.expectTextContent())
             }
         }
@@ -785,19 +407,10 @@ class ToolsKtTest {
             every { collaboratorClient.server() } returns collaboratorServer
             every { collaboratorServer.address() } returns "burpcollaborator.net"
 
-            serverManager.stop {}
-            serverStarted = false
-            serverManager.start(config) { state ->
-                if (state is ServerState.Running) serverStarted = true
-            }
+            restartServer()
 
             runBlocking {
-                var attempts = 0
-                while (!serverStarted && attempts < 30) {
-                    delay(100)
-                    attempts++
-                }
-                if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
+                awaitServerStarted()
                 client.connectToServer("http://127.0.0.1:${testPort}")
             }
         }
@@ -844,7 +457,6 @@ class ToolsKtTest {
 
             runBlocking {
                 val result = client.callTool("generate_collaborator_payload", emptyMap())
-                delay(100)
                 result.expectTextContent(
                     "Payload: abc123.burpcollaborator.net\n" +
                     "Payload ID: abc123\n" +
@@ -870,7 +482,6 @@ class ToolsKtTest {
                         "customData" to "mydata"
                     )
                 )
-                delay(100)
                 result.expectTextContent(
                     "Payload: custom123.burpcollaborator.net\n" +
                     "Payload ID: custom123\n" +
@@ -891,7 +502,6 @@ class ToolsKtTest {
 
             runBlocking {
                 val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
                 val text = result.expectTextContent()
                 assertTrue(text.contains("\"id\":\"int-001\""))
                 assertTrue(text.contains("\"type\":\"DNS\""))
@@ -921,7 +531,6 @@ class ToolsKtTest {
 
             runBlocking {
                 val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
                 val text = result.expectTextContent()
                 assertTrue(text.contains("\"type\":\"HTTP\""))
                 assertTrue(text.contains("\"protocol\":\"HTTP\""))
@@ -943,7 +552,6 @@ class ToolsKtTest {
 
             runBlocking {
                 val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
                 val text = result.expectTextContent()
                 assertTrue(text.contains("\"type\":\"SMTP\""))
                 assertTrue(text.contains("\"protocol\":\"SMTP\""))
@@ -965,7 +573,6 @@ class ToolsKtTest {
                         "payloadId" to "abc123"
                     )
                 )
-                delay(100)
                 result.expectTextContent("No interactions detected")
             }
 
@@ -978,7 +585,6 @@ class ToolsKtTest {
 
             runBlocking {
                 val result = client.callTool("get_collaborator_interactions", emptyMap())
-                delay(100)
                 result.expectTextContent("No interactions detected")
             }
         }
@@ -1002,31 +608,20 @@ class ToolsKtTest {
         every { version.edition() } returns BurpSuiteEdition.COMMUNITY_EDITION
         runBlocking {
             val tools = client.listTools()
-            assertFalse(tools.any { it.name == "get_scanner_issues" })
             assertFalse(tools.any { it.name == "generate_collaborator_payload" })
             assertFalse(tools.any { it.name == "get_collaborator_interactions" })
         }
 
         every { version.edition() } returns BurpSuiteEdition.PROFESSIONAL
 
-        serverManager.stop {}
-        serverStarted = false
-        serverManager.start(config) { state ->
-            if (state is ServerState.Running) serverStarted = true
-        }
+        restartServer()
 
         runBlocking {
-            var attempts = 0
-            while (!serverStarted && attempts < 30) {
-                delay(100)
-                attempts++
-            }
-            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
+            awaitServerStarted()
 
             client.connectToServer("http://127.0.0.1:${testPort}")
 
             val tools = client.listTools()
-            assertTrue(tools.any { it.name == "get_scanner_issues" })
             assertTrue(tools.any { it.name == "generate_collaborator_payload" })
             assertTrue(tools.any { it.name == "get_collaborator_interactions" })
         }

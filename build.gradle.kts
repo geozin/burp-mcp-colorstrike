@@ -1,3 +1,5 @@
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -7,44 +9,59 @@ abstract class EmbedProxyJarTask : DefaultTask() {
     @get:InputFile
     abstract val shadowJarFile: RegularFileProperty
 
-    @get:InputDirectory
-    abstract val projectDir: DirectoryProperty
+    // Only the one proxy JAR actually read — NOT the whole project directory, which Gradle
+    // can't reliably snapshot as a task input (it chokes trying to hash its own build/cache
+    // files living under the project root).
+    @get:InputFile
+    abstract val proxyJarInputFile: RegularFileProperty
+
+    // Declared separately from shadowJarFile (even though it resolves to the same path) so
+    // Gradle has a registered output to track for this task, instead of the task silently
+    // mutating its declared input.
+    @get:OutputFile
+    abstract val outputJarFile: RegularFileProperty
 
     @TaskAction
     fun embedJar() {
         val shadowJar = shadowJarFile.get().asFile
-        val libsDir = projectDir.dir("libs").get().asFile
-        val proxyJarFile = File(libsDir, "mcp-proxy-all.jar")
+        val proxyJarFile = proxyJarInputFile.get().asFile
 
         if (!proxyJarFile.exists()) {
             throw GradleException("Proxy JAR not found at: ${proxyJarFile.absolutePath}")
         }
 
-        // Create a temp file to write the new JAR
-        val tempFile = File(shadowJar.parent, shadowJar.name + ".tmp")
+        // Write the merged archive into the task's own temp directory so a failure never
+        // leaves a stray .tmp file behind, and the input jar is never touched until the
+        // new archive has been fully and successfully built.
+        val tempFile = File(temporaryDir, "${shadowJar.name}.tmp")
+        tempFile.delete()
 
-        ZipOutputStream(tempFile.outputStream().buffered()).use { zos ->
-            // Copy existing entries from shadow JAR
-            ZipInputStream(shadowJar.inputStream().buffered()).use { zis ->
-                var entry = zis.nextEntry
-                while (entry != null) {
-                    zos.putNextEntry(ZipEntry(entry.name))
-                    zis.copyTo(zos)
-                    zos.closeEntry()
-                    entry = zis.nextEntry
+        try {
+            ZipOutputStream(tempFile.outputStream().buffered()).use { zos ->
+                // Copy existing entries from shadow JAR (read-only; input is never modified)
+                ZipInputStream(shadowJar.inputStream().buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        zos.putNextEntry(ZipEntry(entry.name))
+                        zis.copyTo(zos)
+                        zos.closeEntry()
+                        entry = zis.nextEntry
+                    }
                 }
+                // Add proxy JAR
+                zos.putNextEntry(ZipEntry(proxyJarFile.name))
+                proxyJarFile.inputStream().buffered().use { it.copyTo(zos) }
+                zos.closeEntry()
             }
-            // Add proxy JAR
-            zos.putNextEntry(ZipEntry(proxyJarFile.name))
-            proxyJarFile.inputStream().buffered().use { it.copyTo(zos) }
-            zos.closeEntry()
+
+            // Only now that the new archive was written successfully, publish it atomically.
+            val output = outputJarFile.get().asFile
+            Files.move(tempFile.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            tempFile.delete()
         }
 
-        // Replace original with temp
-        shadowJar.delete()
-        tempFile.renameTo(shadowJar)
-
-        logger.lifecycle("Embedded proxy JAR into ${shadowJar.name}")
+        logger.lifecycle("Embedded proxy JAR into ${outputJarFile.get().asFile.name}")
     }
 }
 
@@ -149,12 +166,21 @@ tasks {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 
-    register<EmbedProxyJarTask>("embedProxyJar") {
+    val embedProxyJar = register<EmbedProxyJarTask>("embedProxyJar") {
         group = "build"
         description = "Embeds the MCP proxy JAR into the shadow JAR"
         dependsOn(shadowJar)
         shadowJarFile.set(shadowJar.flatMap { it.archiveFile })
-        projectDir.set(layout.projectDirectory)
+        proxyJarInputFile.set(layout.projectDirectory.file("libs/mcp-proxy-all.jar"))
+        outputJarFile.set(shadowJar.flatMap { it.archiveFile })
+    }
+
+    // Anything that reads the shadow jar's archive file must run after embedProxyJar has
+    // patched it in place — depending only on shadowJar races with embedProxyJar, since both
+    // write/read the same output path. (Only startShadowScripts does today; add further
+    // dependents here if the shadow distribution tasks are ever invoked alongside embedProxyJar.)
+    named("startShadowScripts") {
+        dependsOn(embedProxyJar)
     }
 
     build {

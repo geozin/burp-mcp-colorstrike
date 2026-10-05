@@ -6,8 +6,11 @@ import burp.api.montoya.persistence.PersistedObject
 import io.mockk.every
 import io.mockk.mockk
 import io.modelcontextprotocol.kotlin.sdk.TextContent
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import net.portswigger.mcp.config.McpConfig
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
@@ -36,8 +39,7 @@ class ProxyEndToEndTest {
     private val testPort = findAvailablePort()
     private val persistedObject = mockk<PersistedObject>()
 
-    @Volatile
-    private var serverStarted = false
+    private val serverStarted = CompletableDeferred<Unit>()
 
     init {
         every { persistedObject.getBoolean(any()) } returns true
@@ -66,16 +68,13 @@ class ProxyEndToEndTest {
     fun setup(): Unit = runBlocking {
         serverManager.start(config) { state ->
             if (state is ServerState.Running) {
-                serverStarted = true
+                serverStarted.complete(Unit)
             }
         }
 
-        var attempts = 0
-        while (!serverStarted && attempts < 10) {
-            delay(100)
-            attempts++
-        }
-        if (!serverStarted) {
+        try {
+            withTimeout(1000) { serverStarted.await() }
+        } catch (e: TimeoutCancellationException) {
             throw IllegalStateException("Server failed to start after timeout")
         }
 

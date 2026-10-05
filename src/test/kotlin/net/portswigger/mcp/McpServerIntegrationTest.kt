@@ -5,8 +5,10 @@ import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import net.portswigger.mcp.config.McpConfig
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
@@ -20,7 +22,7 @@ class McpServerIntegrationTest {
     private val serverManager = KtorServerManager(api)
     private val testPort = findAvailablePort()
     private val persistedObject = mockk<PersistedObject>()
-    private var serverStarted = false
+    private val serverStarted = CompletableDeferred<Unit>()
 
     init {
         every { persistedObject.getBoolean(any()) } returns true
@@ -42,18 +44,14 @@ class McpServerIntegrationTest {
     fun setup() {
         serverManager.start(config) { state ->
             if (state is ServerState.Running) {
-                serverStarted = true
+                serverStarted.complete(Unit)
             }
         }
-        
+
         runBlocking {
-            var attempts = 0
-            while (!serverStarted && attempts < 10) {
-                delay(100)
-                attempts++
-            }
-            
-            if (!serverStarted) {
+            try {
+                withTimeout(1000) { serverStarted.await() }
+            } catch (e: TimeoutCancellationException) {
                 throw IllegalStateException("Server failed to start after timeout")
             }
         }
@@ -83,8 +81,8 @@ class McpServerIntegrationTest {
             assertFalse(tools.isEmpty(), "Server should have registered tools")
             
             val toolNames = tools.map { it.name }
-            assertTrue(toolNames.contains("output_project_options"), "Server should have output_project_options tool")
-            assertTrue(toolNames.contains("output_user_options"), "Server should have output_user_options tool")
+            assertTrue(toolNames.contains("send_request"), "Server should have send_request tool")
+            assertTrue(toolNames.contains("get_proxy_http_history"), "Server should have get_proxy_http_history tool")
             
             val pingResult = client.ping()
             assertNotNull(pingResult, "Ping should return a result")
