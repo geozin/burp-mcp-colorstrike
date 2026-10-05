@@ -12,7 +12,10 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
@@ -518,55 +521,125 @@ private fun replaceParamValue(paramString: String, paramName: String, newValue: 
 }
 
 /**
- * Replaces the value of a field in a JSON body.
- * Supports strings, numbers and booleans.
+ * Replaces the value of a field in a JSON body — JSON-aware (parses, finds the shallowest
+ * object that has fieldName as a direct key via breadth-first search, rebuilds, re-encodes)
+ * rather than regex over raw text. A regex match can't tell a real field from the same text
+ * appearing inside an unrelated string literal (e.g. a log message containing
+ * "codigoFilial": 5 as plain text), and can't deterministically pick which occurrence to
+ * replace when nested objects repeat a field name — BFS always picks the outermost one.
  * Ex: replaceJsonValue("""{"codigoFilial":73,"foo":"bar"}""", "codigoFilial", "99")
  *     → """{"codigoFilial":99,"foo":"bar"}"""
- *
- * If injected value is numeric or boolean, replaces without quotes.
- * If string, replaces with quotes.
- * Returns null if field not found.
+ * Returns null if the JSON is malformed or the field isn't found anywhere.
  */
-// Valid JSON number grammar — rejects leading zeros (e.g. "0123"), which
-// toDoubleOrNull() accepts but which is not a legal JSON number literal.
-private val JSON_NUMBER_REGEX = Regex("""-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?""")
-private const val JSON_VALUE_PATTERN = """"([^"\\]|\\.)*"|true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?"""
-private val jsonFieldRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
-
 private fun replaceJsonValue(json: String, fieldName: String, newValue: String): String? {
-    // Detect if newValue should be inserted as number/bool or JSON string
-    val isNumeric = JSON_NUMBER_REGEX.matches(newValue)
-    val isBool    = newValue.equals("true", ignoreCase = true) || newValue.equals("false", ignoreCase = true)
-    val isNull    = newValue.equals("null", ignoreCase = true)
+    val root = try { Json.parseToJsonElement(json) } catch (e: Exception) { return null }
 
-    // Regex that captures "fieldName": <value> — supports string, number, bool and null.
-    // Cached per fieldName since the same field is typically reused across every payload.
-    val regex = jsonFieldRegexCache.getOrCompileBounded(fieldName) {
-        Regex(""""${Regex.escape(fieldName)}"\s*:\s*($JSON_VALUE_PATTERN)""")
-    }
-    val match = regex.find(json) ?: return null
-
-    val replacement = when {
-        isNull    -> "null"
-        isBool    -> newValue.lowercase()
-        isNumeric -> newValue
-        else      -> "\"${newValue.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+    val replacementElement: JsonElement = when {
+        newValue.equals("null", ignoreCase = true) -> JsonNull
+        newValue.equals("true", ignoreCase = true) || newValue.equals("false", ignoreCase = true) ->
+            JsonPrimitive(newValue.lowercase().toBoolean())
+        // Round-trip check avoids silently dropping a meaningful leading zero (e.g. injecting
+        // the literal zip code "0123") — toLongOrNull() parses "0123" as 123 happily, which
+        // is not the exact byte-for-byte value the caller asked to inject.
+        newValue.toLongOrNull()?.toString() == newValue -> JsonPrimitive(newValue.toLong())
+        newValue.toDoubleOrNull() != null -> JsonPrimitive(newValue.toDouble())
+        else -> JsonPrimitive(newValue)
     }
 
-    return json.substring(0, match.range.first) +
-           "\"$fieldName\": $replacement" +
-           json.substring(match.range.last + 1)
+    // Breadth-first search for the shallowest JSON object that has fieldName as a direct key.
+    var targetObject: JsonObject? = null
+    val queue = ArrayDeque<JsonElement>()
+    queue.add(root)
+    while (queue.isNotEmpty() && targetObject == null) {
+        when (val current = queue.removeFirst()) {
+            is JsonObject -> {
+                if (current.containsKey(fieldName)) {
+                    targetObject = current
+                } else {
+                    current.values.forEach { queue.add(it) }
+                }
+            }
+            is JsonArray -> current.forEach { queue.add(it) }
+            else -> {}
+        }
+    }
+    val target = targetObject ?: return null
+
+    fun rebuild(element: JsonElement): JsonElement = when (element) {
+        is JsonObject -> if (element === target) {
+            JsonObject(element.toMap() + (fieldName to replacementElement))
+        } else {
+            JsonObject(element.mapValues { (_, v) -> rebuild(v) })
+        }
+        is JsonArray -> JsonArray(element.map { rebuild(it) })
+        else -> element
+    }
+
+    return Json.encodeToString(JsonElement.serializer(), rebuild(root))
 }
 
 /**
- * Injects payload into body — auto-detects JSON vs form-urlencoded.
+ * Detects whether a body is multipart/form-data.
+ */
+private fun isMultipartBody(body: String): Boolean {
+    val trimmed = body.trimStart()
+    return trimmed.startsWith("--") && trimmed.contains("Content-Disposition", ignoreCase = true)
+}
+
+/**
+ * Replaces a field's value, or a part's filename attribute, inside a multipart/form-data body.
+ * Supports:
+ * - Qualified filename: paramName = "avatar.filename" (replaces filename="..." on the part named "avatar")
+ * - Global filename: paramName = "filename" (replaces the first filename="...")
+ * - Field value: paramName = "username", "token", "file", etc. (replaces the part's content)
+ */
+private fun replaceMultipartValue(body: String, paramName: String, newValue: String): String? {
+    // 1. Qualified filename: <partName>.filename
+    if (paramName.contains(".filename", ignoreCase = true)) {
+        val dotIdx = paramName.lastIndexOf(".filename", ignoreCase = true)
+        val field = if (dotIdx != -1) paramName.substring(0, dotIdx).trim() else ""
+        val fieldPattern = """(?:"${Regex.escape(field)}"|${Regex.escape(field)}(?=[;\s\r\n]|$))"""
+        val regex = Regex("""(Content-Disposition:[^\r\n]*\bname\s*=\s*$fieldPattern[^\r\n]*\bfilename\s*=\s*")([^"]*)(")""", RegexOption.IGNORE_CASE)
+        val match = regex.find(body)
+        if (match != null) {
+            val g2 = match.groups[2]!!
+            return body.substring(0, g2.range.first) + newValue + body.substring(g2.range.last + 1)
+        }
+    }
+
+    // 2. Global filename: paramName == "filename"
+    if (paramName.equals("filename", ignoreCase = true)) {
+        val regex = Regex("""(Content-Disposition:[^\r\n]*\bfilename\s*=\s*")([^"]*)(")""", RegexOption.IGNORE_CASE)
+        val match = regex.find(body)
+        if (match != null) {
+            val g2 = match.groups[2]!!
+            return body.substring(0, g2.range.first) + newValue + body.substring(g2.range.last + 1)
+        }
+    }
+
+    // 3. Regular form-data part matching name="paramName"
+    val namePattern = """(?:"${Regex.escape(paramName)}"|${Regex.escape(paramName)}(?=[;\s\r\n]|$))"""
+    val partRegex = Regex("""Content-Disposition:[^\r\n]*\bname\s*=\s*$namePattern""", RegexOption.IGNORE_CASE)
+    val headerMatch = partRegex.find(body) ?: return null
+
+    val headerEndMatch = Regex("""\r?\n\r?\n""").find(body, startIndex = headerMatch.range.last) ?: return null
+    val bodyStartIndex = headerEndMatch.range.last + 1
+
+    val boundaryMatch = Regex("""\r?\n--""").find(body, startIndex = bodyStartIndex)
+    val bodyEndIndex = boundaryMatch?.range?.first ?: body.length
+
+    return body.substring(0, bodyStartIndex) + newValue + body.substring(bodyEndIndex)
+}
+
+/**
+ * Injects payload into body — auto-detects JSON, multipart/form-data, or form-urlencoded.
  */
 private fun replaceInBody(body: String, paramName: String, newValue: String): String? {
     val trimmed = body.trimStart()
-    return if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        replaceJsonValue(body, paramName, newValue)
-    } else {
-        replaceParamValue(body, paramName, newValue)
+    return when {
+        trimmed.startsWith("{") || trimmed.startsWith("[") -> replaceJsonValue(body, paramName, newValue)
+        isMultipartBody(body) -> replaceMultipartValue(body, paramName, newValue)
+        else -> replaceParamValue(body, paramName, newValue)
     }
 }
 
@@ -1193,7 +1266,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "'path' → replaces last path segment; " +
         "'path[N]' → replaces the Nth path segment, 0-based (e.g. 'path[1]' hits \"1233\" in \"/teste/1233/abc\" — plain 'path' only ever hits \"abc\"); " +
         "'path:value' → replaces whichever segment currently equals value (e.g. 'path:1233' finds \"1233\" directly, no index counting needed); " +
-        "'body:paramName' → replaces param value in form-urlencoded body (e.g. 'body:action'); " +
+        "'body:paramName' → replaces param value in JSON, form-urlencoded, or multipart/form-data body (e.g. 'body:action', or 'body:avatar.filename' for a multipart part's filename); " +
         "'query:paramName' → replaces param value in query string (e.g. 'query:page'); " +
         "'header:HeaderName' → replaces header value (e.g. 'header:User-Agent'). " +
         "FALLBACK when injectAt is omitted: " +
