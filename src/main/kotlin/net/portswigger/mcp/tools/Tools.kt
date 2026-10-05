@@ -155,6 +155,30 @@ private fun findFilteredHistoryItem(api: MontoyaApi, burpIndex: Int): IndexedPro
     return null
 }
 
+/**
+ * Explains WHY a given index isn't visible to the filtered tools (send_request,
+ * get_request_by_index), instead of a generic "not found" — distinguishes "doesn't exist
+ * in Burp's history at all" from "exists but isn't highlighted" from "exists but is a
+ * static resource", since create_repeater_tab(index=N) searches raw (unfiltered) history
+ * and can find items these tools can't, which is confusing without an explanation.
+ */
+private fun diagnoseMissingFilteredIndex(api: MontoyaApi, index: Int): String {
+    val rawItem = api.proxy().history().firstOrNull { it.id() == index }
+        ?: return "[!] Item #$index does not exist in Burp's proxy history."
+
+    val highlight = rawItem.annotations().highlightColor()
+    val hasHighlight = highlight != null && highlight != burp.api.montoya.core.HighlightColor.NONE
+    val isStatic = isStaticUrl(rawItem.finalRequest().url())
+
+    val reasons = mutableListOf<String>()
+    if (!hasHighlight) reasons.add("isn't highlighted in Proxy History")
+    if (isStatic) reasons.add("points to a static resource (image/css/js/font)")
+
+    return "[!] Item #$index exists in proxy history, but is out of scope for this tool " +
+        "(${reasons.joinToString(" and ")}). Highlight the request in Burp to bring it into " +
+        "scope, or use CreateRepeaterTab(index=$index) to review it manually without that restriction."
+}
+
 // =============================================================================
 // NOISE FILTER
 // =============================================================================
@@ -375,6 +399,14 @@ private fun looksLikeAuthPayload(payload: String): Boolean {
 
 private val AUTHORIZATION_HEADER_REGEX = Regex("(?i)(Authorization:\\s*).*")
 
+/**
+ * Strips CRLF from a value about to be embedded as a header value in a raw HTTP message.
+ * A payload containing literal \r\n would otherwise desync the line-based parsing of the
+ * request being built (extra/corrupted lines), effectively a header/request-splitting bug
+ * in the injection engine itself rather than something actually reaching the target.
+ */
+private fun sanitizeHeaderValue(value: String): String = value.replace("\r", "").replace("\n", "")
+
 private fun injectIntoAuthHeader(headers: MutableMap<String, String>, payload: String) {
     val key = headers.keys.firstOrNull { it.equals("authorization", ignoreCase = true) }
     if (key != null) {
@@ -395,6 +427,10 @@ private fun injectIntoLastPathSegment(path: String, payload: String): String {
     }
 }
 
+// Matches "path[N]" — bracket syntax deliberately distinct from "path:value" below so a
+// numeric segment VALUE (e.g. "path:1233") is never ambiguous with a segment INDEX.
+private val PATH_INDEX_REGEX = Regex("""^path\[(\d+)]$""", RegexOption.IGNORE_CASE)
+
 /**
  * Replaces the path segment at a given 0-based index — e.g. for "/teste/1233/abc",
  * index 0 = "teste", index 1 = "1233", index 2 = "abc". Needed because
@@ -410,6 +446,23 @@ private fun replacePathSegmentByIndex(path: String, index: Int, payload: String)
     val segments = (if (leadingSlash) pathOnly.substring(1) else pathOnly).split("/").toMutableList()
     if (index !in segments.indices) return null
     segments[index] = payload
+    return (if (leadingSlash) "/" else "") + segments.joinToString("/") + query
+}
+
+/**
+ * Replaces whichever path segment currently equals segmentValue — e.g. for
+ * "/teste/1233/abc", replacePathSegmentByValue(path, "1233", payload) finds it directly,
+ * no need to count segment positions first. Returns null if no segment matches.
+ */
+private fun replacePathSegmentByValue(path: String, segmentValue: String, payload: String): String? {
+    val queryStart = path.indexOf('?')
+    val pathOnly    = if (queryStart != -1) path.substring(0, queryStart) else path
+    val query       = if (queryStart != -1) path.substring(queryStart) else ""
+    val leadingSlash = pathOnly.startsWith("/")
+    val segments = (if (leadingSlash) pathOnly.substring(1) else pathOnly).split("/").toMutableList()
+    val idx = segments.indexOf(segmentValue)
+    if (idx == -1) return null
+    segments[idx] = payload
     return (if (leadingSlash) "/" else "") + segments.joinToString("/") + query
 }
 
@@ -606,7 +659,7 @@ private fun injectExplicit(
                 if (colonIdx > 0) {
                     val name = trimmed.substring(0, colonIdx).trim()
                     if (name.equals(targetParam, ignoreCase = true)) {
-                        lines[i] = "$name: $value"
+                        lines[i] = "$name: ${sanitizeHeaderValue(value)}"
                         found = true
                         break
                     }
@@ -646,7 +699,7 @@ private fun injectExplicitHttp2(
         "header" -> {
             val key = headers.keys.firstOrNull { it.equals(targetParam, ignoreCase = true) }
                 ?: return null
-            headers[key] = value
+            headers[key] = sanitizeHeaderValue(value)
             Triple(path, headers, body)
         }
         else -> null
@@ -658,8 +711,10 @@ private fun injectExplicitHttp2(
  * Supported formats:
  *   "method"            → replaces HTTP verb on first line
  *   "path"              → replaces last path segment
- *   "path:N"            → replaces the Nth path segment (0-based, e.g. "path:1" for
+ *   "path[N]"           → replaces the Nth path segment, 0-based (e.g. "path[1]" for
  *                         "1233" in "/teste/1233/abc" — "path" alone only ever hits "abc")
+ *   "path:value"        → replaces whichever segment currently equals value (e.g.
+ *                         "path:1233" finds and replaces "1233" directly, no index needed)
  *   "body:paramName"    → replaces param value in form-urlencoded body
  *   "query:paramName"   → replaces param value in query string
  *   "header:HeaderName" → replaces header value
@@ -682,12 +737,21 @@ private fun resolveInjectAt(rawContent: String, injectAt: String, payload: Strin
             lines[0] = "${parts[0]} $newPath ${parts.getOrElse(2) { "HTTP/1.1" }}"
             lines.joinToString("\n")
         }
-        injectAt.startsWith("path:", ignoreCase = true) -> {
-            val index = injectAt.substringAfter(":").toIntOrNull() ?: return null
+        PATH_INDEX_REGEX.matches(injectAt) -> {
+            val index = PATH_INDEX_REGEX.find(injectAt)!!.groupValues[1].toInt()
             val lines = rawContent.split("\n").toMutableList()
             val parts = lines[0].trimEnd().split(" ")
             if (parts.size < 2) return null
             val newPath = replacePathSegmentByIndex(parts[1], index, payload) ?: return null
+            lines[0] = "${parts[0]} $newPath ${parts.getOrElse(2) { "HTTP/1.1" }}"
+            lines.joinToString("\n")
+        }
+        injectAt.startsWith("path:", ignoreCase = true) -> {
+            val segmentValue = injectAt.substringAfter(":")
+            val lines = rawContent.split("\n").toMutableList()
+            val parts = lines[0].trimEnd().split(" ")
+            if (parts.size < 2) return null
+            val newPath = replacePathSegmentByValue(parts[1], segmentValue, payload) ?: return null
             lines[0] = "${parts[0]} $newPath ${parts.getOrElse(2) { "HTTP/1.1" }}"
             lines.joinToString("\n")
         }
@@ -723,9 +787,14 @@ private fun resolveInjectAtHttp2(
             Triple(path, payload, body)
         injectAt.equals("path", ignoreCase = true) ->
             Triple(injectIntoLastPathSegment(path, payload), method, body)
-        injectAt.startsWith("path:", ignoreCase = true) -> {
-            val index = injectAt.substringAfter(":").toIntOrNull() ?: return null
+        PATH_INDEX_REGEX.matches(injectAt) -> {
+            val index = PATH_INDEX_REGEX.find(injectAt)!!.groupValues[1].toInt()
             val newPath = replacePathSegmentByIndex(path, index, payload) ?: return null
+            Triple(newPath, method, body)
+        }
+        injectAt.startsWith("path:", ignoreCase = true) -> {
+            val segmentValue = injectAt.substringAfter(":")
+            val newPath = replacePathSegmentByValue(path, segmentValue, payload) ?: return null
             Triple(newPath, method, body)
         }
         injectAt.startsWith("body:", ignoreCase = true) -> {
@@ -746,7 +815,7 @@ private fun resolveInjectAtHttp2(
             val headerName = injectAt.substringAfter(":")
             val key = headers.keys.firstOrNull { it.equals(headerName, ignoreCase = true) }
                 ?: return null
-            headers[key] = payload
+            headers[key] = sanitizeHeaderValue(payload)
             Triple(path, method, body)
         }
         else -> null
@@ -769,7 +838,11 @@ private fun fixContentLengthAndNormalizeCrlf(rawContent: String): String {
 
     val headersPart = crlfContent.substring(0, headerBodySplit)
     val bodyPart = crlfContent.substring(headerBodySplit + 4)
-    val bodyBytes = bodyPart.toByteArray(Charsets.UTF_8).size
+    // rawContent comes from Burp's HttpRequest.toString(), which represents the raw wire
+    // bytes via ISO-8859-1 (1 char = 1 byte) so binary/non-ASCII bodies survive intact.
+    // Measuring via UTF-8 here would inflate Content-Length for any byte >= 0x80
+    // (accented text, binary payloads) since UTF-8 multi-byte-encodes those code points.
+    val bodyBytes = bodyPart.toByteArray(Charsets.ISO_8859_1).size
 
     val headerLines = headersPart.split("\r\n").toMutableList()
     val clIdx = headerLines.indexOfFirst { it.trimStart().lowercase().startsWith("content-length:") }
@@ -790,7 +863,7 @@ private suspend fun executeSendRequest(
     injectAt: String? = null
 ): String {
     val found = findFilteredHistoryItem(api, index)
-        ?: return "[!] Item #$index not found in filtered history (may be static/out-of-scope)."
+        ?: return diagnoseMissingFilteredIndex(api, index)
 
     val rawRequest = found.item.finalRequest()
     val rawContent = rawRequest.toString()
@@ -1118,7 +1191,8 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "injectAt formats: " +
         "'method' → replaces HTTP verb (payloads: [\"GET\",\"PUT\",\"DELETE\"]); " +
         "'path' → replaces last path segment; " +
-        "'path:N' → replaces the Nth path segment, 0-based (e.g. 'path:1' hits \"1233\" in \"/teste/1233/abc\" — plain 'path' only ever hits \"abc\"); " +
+        "'path[N]' → replaces the Nth path segment, 0-based (e.g. 'path[1]' hits \"1233\" in \"/teste/1233/abc\" — plain 'path' only ever hits \"abc\"); " +
+        "'path:value' → replaces whichever segment currently equals value (e.g. 'path:1233' finds \"1233\" directly, no index counting needed); " +
         "'body:paramName' → replaces param value in form-urlencoded body (e.g. 'body:action'); " +
         "'query:paramName' → replaces param value in query string (e.g. 'query:page'); " +
         "'header:HeaderName' → replaces header value (e.g. 'header:User-Agent'). " +
@@ -1151,7 +1225,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         if (!allowed) return@mcpTool "Denied"
 
         val found = findFilteredHistoryItem(api, index)
-            ?: return@mcpTool "[!] Item #$index not found in filtered history (may be static/out-of-scope)."
+            ?: return@mcpTool diagnoseMissingFilteredIndex(api, index)
 
         val serialized = removeVisualNoise(
             Json.encodeToString(found.item.toSerializableForm())
@@ -1512,7 +1586,8 @@ data class SendRequest(
     val injectAt: String? = null      // where to inject the payload — examples:
                                       //   "method"            → replaces HTTP verb
                                       //   "path"              → replaces last path segment
-                                      //   "path:1"            → replaces the Nth path segment (0-based)
+                                      //   "path[1]"           → replaces the Nth path segment (0-based)
+                                      //   "path:1233"         → replaces whichever segment equals "1233"
                                       //   "body:action"       → replaces value of param 'action' in body
                                       //   "query:page"        → replaces value of param 'page' in query string
                                       //   "header:User-Agent" → replaces value of header 'User-Agent'
