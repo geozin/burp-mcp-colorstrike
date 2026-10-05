@@ -51,7 +51,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
     private lateinit var serverConfigurationPanel: ServerConfigurationPanel
     private lateinit var advancedOptionsPanel: AdvancedOptionsPanel
-    private lateinit var autoApproveTargetsPanel: AutoApproveTargetsPanel
     private lateinit var installationPanel: InstallationPanel
 
     private var toggleListener: ((Boolean) -> Unit)? = null
@@ -86,8 +85,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
             hostField = hostField, portField = portField, reinstallNotice = reinstallNotice
         )
 
-        autoApproveTargetsPanel = AutoApproveTargetsPanel(config = config)
-
         installationPanel = InstallationPanel(
             config = config, providers = providers, reinstallNotice = reinstallNotice, parentComponent = panel
         )
@@ -112,10 +109,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         listenerHandles.forEach { it.remove() }
         listenerHandles.clear()
         historyAccessRefreshListener = null
-
-        if (::autoApproveTargetsPanel.isInitialized) {
-            autoApproveTargetsPanel.cleanup()
-        }
     }
 
     fun onEnabledToggled(listener: (Boolean) -> Unit) {
@@ -224,9 +217,6 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         rightPanelContent.add(serverConfigurationPanel)
         rightPanelContent.add(createVerticalStrut(Design.Spacing.LG))
 
-        rightPanelContent.add(autoApproveTargetsPanel)
-
-        rightPanelContent.add(createVerticalStrut(15))
         rightPanelContent.add(advancedOptionsPanel)
         rightPanelContent.add(createVerticalGlue())
         rightPanelContent.add(reinstallNotice)
@@ -278,16 +268,18 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
         // Prism: white light in from the left, split into six labeled color rays —
         // ColorStrike's own highlight-color triage, drawn as light instead of a legend.
         private const val PRISM_ASCII = """
-                                  ◢▲◣
-            ─────────────────── ◢████◣
+            ───────────────────────◢▲◣
+                                  ◢███◣
+                                 ◢█████◣
                                 █████████▶ R
                                 █████████▶ O
                                 █████████▶ Y
                                 █████████▶ G
                                 █████████▶ B
                                 █████████▶ V
-                                 ◥██████◤
-                                   ◥██◤
-                      [ COLORSTRIKE :: MCP ]"""
+                                 ◥█████◤
+                                  ◥███◤
+                                   ◥█◤
+                         [ COLORSTRIKE :: MCP ]"""
     }
 }
