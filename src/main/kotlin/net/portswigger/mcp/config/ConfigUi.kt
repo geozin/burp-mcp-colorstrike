@@ -190,8 +190,8 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
             add(createVerticalStrut(Design.Spacing.MD))
             add(
                 Anchor(
-                    text = "Learn more about the Model Context Protocol",
-                    url = "https://modelcontextprotocol.io/introduction"
+                    text = "github.com/geozin/burp-mcp-colorstrike",
+                    url = "https://github.com/geozin/burp-mcp-colorstrike"
                 ).apply { alignmentX = CENTER_ALIGNMENT })
         }
 
