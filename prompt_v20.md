@@ -317,11 +317,13 @@ Wrong (NEVER do):
 **`injectAt` formats:**
 | Value | Where it injects | Example |
 |:------|:------------|:--------|
-| `"body:param"` | Param in form-urlencoded or JSON body | `"body:action"` |
+| `"body:param"` | Param in form-urlencoded, JSON, or multipart/form-data body | `"body:action"`, `"body:avatar.filename"` |
 | `"query:param"` | Param in query string | `"query:page"` |
 | `"header:Header"` | Header value | `"header:User-Agent"` |
 | `"method"` | HTTP verb | payloads: `["GET","PUT","DELETE"]` |
 | `"path"` | Last path segment | Path IDOR |
+| `"path[N]"` | Nth path segment, 0-based | `"path[1]"` for `"1233"` in `/teste/1233/abc` |
+| `"path:value"` | Whichever segment currently equals `value` — no index counting needed | `"path:1233"` finds `"1233"` directly |
 
 **When to omit `injectAt` — automatic fallback:**
 | Situation | Automatic mode |
@@ -426,6 +428,7 @@ NEVER pass milliseconds. NEVER ask for the unit.
 | **SSTI in param** | Expressions per engine | `"body:paramName"` or `"query:paramName"` |
 | **IDOR in body param** | IDs: `[ID-1, ID, ID+1]` | `"body:paramName"` |
 | **IDOR in query param** | IDs: `[ID-1, ID, ID+1]` | `"query:paramName"` |
+| **IDOR in path segment** (e.g. `/users/1233/orders`) | IDs: `[ID-1, ID, ID+1]` | `"path:1233"` (or `"path[N]"` by index) |
 | **Header injection** | Payload in value | `"header:HeaderName"` |
 | **HTTP method fuzzing** | `["GET","PUT","DELETE","PATCH","OPTIONS"]` | `"method"` |
 | **BOLA/IDOR path** | Numeric ID: `[ID-1, ID, ID+1]` | omit (auto path) |
