@@ -1,6 +1,7 @@
 package net.portswigger.mcp.schema
 
 import io.modelcontextprotocol.kotlin.sdk.Tool
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -39,8 +40,15 @@ fun getJsonSchemaForProperty(kType: kotlin.reflect.KType): JsonElement {
             JsonObject(mapOf("type" to JsonPrimitive("object"), "additionalProperties" to valueSchema))
         }
 
-        else ->
-            JsonObject(mapOf("type" to JsonPrimitive("object")))
+        else -> {
+            val kClass = kType.classifier as? KClass<*>
+            if (kClass != null && kClass.java.isEnum) {
+                val enumValues = kClass.java.enumConstants.map { JsonPrimitive((it as Enum<*>).name) }
+                JsonObject(mapOf("type" to JsonPrimitive("string"), "enum" to JsonArray(enumValues)))
+            } else {
+                JsonObject(mapOf("type" to JsonPrimitive("object")))
+            }
+        }
     }
 }
 

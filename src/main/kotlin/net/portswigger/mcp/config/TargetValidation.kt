@@ -23,9 +23,15 @@ object TargetValidation {
         if (target.contains("\t") || target.contains("\n") || target.contains("\r")) return false
 
         if (target.startsWith("[") && target.contains("]:")) {
+            val hostPart = target.substringAfter("[").substringBeforeLast("]:")
             val portPart = target.substringAfterLast(":")
             val port = portPart.toIntOrNull()
-            return !(port == null || port < 1 || port > 65535)
+            if (port == null || port < 1 || port > 65535) return false
+            return ConfigValidation.isValidIpv6Literal(hostPart)
+        }
+
+        if (target.startsWith("[") && target.endsWith("]")) {
+            return ConfigValidation.isValidIpv6Literal(target.substring(1, target.length - 1))
         }
 
         val parts = target.split(":")
@@ -33,7 +39,7 @@ object TargetValidation {
             val port = parts[1].toIntOrNull()
             if (port == null || port < 1 || port > 65535) return false
         } else if (parts.size > 2) {
-            return true
+            return ConfigValidation.isValidIpv6Literal(target)
         }
 
         return true
