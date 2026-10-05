@@ -8,7 +8,7 @@ import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -86,10 +86,21 @@ private val STATIC_EXTENSIONS = setOf(
     ".wpd"
 )
 
+// Single-segment extensions ("jpg") checked via O(1) hash lookup; the handful of
+// compound extensions ("css.map") need a suffix scan, but over a tiny list only.
+private val STATIC_EXTENSIONS_SINGLE = STATIC_EXTENSIONS
+    .filter { it.count { c -> c == '.' } == 1 }
+    .mapTo(HashSet()) { it.removePrefix(".") }
+private val STATIC_EXTENSIONS_COMPOUND = STATIC_EXTENSIONS
+    .filter { it.count { c -> c == '.' } > 1 }
+
 private fun isStaticUrl(url: String): Boolean {
     val lower = url.lowercase()
     val path = lower.substringBefore('?').substringBefore('#')
-    return STATIC_EXTENSIONS.any { path.endsWith(it) }
+    val lastDot = path.lastIndexOf('.')
+    if (lastDot == -1) return false
+    if (path.substring(lastDot + 1) in STATIC_EXTENSIONS_SINGLE) return true
+    return STATIC_EXTENSIONS_COMPOUND.any { path.endsWith(it) }
 }
 
 // =============================================================================
@@ -125,18 +136,38 @@ private fun getFilteredHttpHistory(api: MontoyaApi): List<IndexedProxyItem> {
         .sortedByDescending { it.burpIndex }
 }
 
+/**
+ * Looks up a single filtered history item by its real Burp index without
+ * filtering/mapping/sorting the entire history first — avoids an O(n log n)
+ * pass + full copy when only one item is needed (single-item lookups).
+ */
+private fun findFilteredHistoryItem(api: MontoyaApi, burpIndex: Int): IndexedProxyItem? {
+    for (reqRes in api.proxy().history()) {
+        if (reqRes.id() != burpIndex) continue
+        val highlight = reqRes.annotations().highlightColor()
+        val hasHighlight = highlight != null && highlight != burp.api.montoya.core.HighlightColor.NONE
+        return if (hasHighlight && !isStaticUrl(reqRes.finalRequest().url())) {
+            IndexedProxyItem(reqRes.id(), reqRes)
+        } else {
+            null
+        }
+    }
+    return null
+}
+
 // =============================================================================
 // NOISE FILTER
 // =============================================================================
 
+private val SVG_REGEX = Regex("""(?i)<svg[\s\S]*?(?:</svg>|<\\/svg>|<\\\\/svg>)""")
+private val BASE64_IMAGE_REGEX = Regex("""(?i)data:image/[a-zA-Z0-9+.-]+;base64,[a-zA-Z0-9+/=]+""")
+private val VIEWSTATE_REGEX = Regex("""(?i)("__VIEWSTATE"\s*(?::|value=)\s*\\?")[a-zA-Z0-9+/=]+\\?"""")
+
 private fun removeVisualNoise(json: String): String {
     var cleaned = json
-    val svgRegex = Regex("""(?i)<svg[\s\S]*?(?:</svg>|<\\/svg>|<\\\\/svg>)""")
-    cleaned = cleaned.replace(svgRegex, "<svg>...[TRUNCATED SVG]...</svg>")
-    val base64Regex = Regex("""(?i)data:image/[a-zA-Z0-9+.-]+;base64,[a-zA-Z0-9+/=]+""")
-    cleaned = cleaned.replace(base64Regex, "data:image/...;base64,[TRUNCATED BASE64]")
-    val viewStateRegex = Regex("""(?i)("__VIEWSTATE"\s*(?::|value=)\s*\\?")[a-zA-Z0-9+/=]+\\?"""")
-    cleaned = cleaned.replace(viewStateRegex, "$1[TRUNCATED VIEWSTATE]\"")
+    cleaned = cleaned.replace(SVG_REGEX, "<svg>...[TRUNCATED SVG]...</svg>")
+    cleaned = cleaned.replace(BASE64_IMAGE_REGEX, "data:image/...;base64,[TRUNCATED BASE64]")
+    cleaned = cleaned.replace(VIEWSTATE_REGEX, "$1[TRUNCATED VIEWSTATE]\"")
     return cleaned
 }
 
@@ -151,25 +182,21 @@ private fun removeVisualNoise(json: String): String {
  *   - Bearer token: Bearer <value>                    → Bearer [TOKEN TRUNCATED]
  *   - Authorization with non-Bearer token (Basic, etc.) → preserves scheme, truncates value
  */
+// 3-part JWT (header.payload.signature) — covers any field, not just Authorization
+private val JWT_REGEX = Regex("""eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+""")
+// 2-part JWT (unsigned, e.g. unsigned JWS)
+private val JWT_UNSIGNED_REGEX = Regex("""eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{20,}""")
+// Bearer <token> em qualquer header ou campo
+private val BEARER_TOKEN_REGEX = Regex("""(?i)(Bearer\s+)[A-Za-z0-9_\-\.~+/]+=*""")
+// Authorization: Basic/Digest/NTLM/AWS4-HMAC etc. (anything non-Bearer already handled above)
+private val AUTH_SCHEME_TOKEN_REGEX = Regex("""(?i)(Authorization:\s*(?!Bearer)[A-Za-z0-9_-]+\s+)[^\s"\\,]{16,}""")
+
 private fun truncateTokens(text: String): String {
     var result = text
-
-    // 3-part JWT (header.payload.signature) — covers any field, not just Authorization
-    val jwtRegex = Regex("""eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+""")
-    result = result.replace(jwtRegex, "eyJ...[JWT TRUNCATED]")
-
-    // 2-part JWT (unsigned, e.g. unsigned JWS)
-    val jwtUnsignedRegex = Regex("""eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]{20,}""")
-    result = result.replace(jwtUnsignedRegex, "eyJ...[JWT TRUNCATED]")
-
-    // Bearer <token> em qualquer header ou campo
-    val bearerRegex = Regex("""(?i)(Bearer\s+)[A-Za-z0-9_\-\.~+/]+=*""")
-    result = result.replace(bearerRegex) { mr -> "${mr.groupValues[1]}[TOKEN TRUNCATED]" }
-
-    // Authorization: Basic/Digest/NTLM/AWS4-HMAC etc. (anything non-Bearer already handled above)
-    val authSchemeRegex = Regex("""(?i)(Authorization:\s*(?!Bearer)[A-Za-z0-9_-]+\s+)[^\s"\\,]{16,}""")
-    result = result.replace(authSchemeRegex) { mr -> "${mr.groupValues[1]}[TOKEN TRUNCATED]" }
-
+    result = result.replace(JWT_REGEX, "eyJ...[JWT TRUNCATED]")
+    result = result.replace(JWT_UNSIGNED_REGEX, "eyJ...[JWT TRUNCATED]")
+    result = result.replace(BEARER_TOKEN_REGEX) { mr -> "${mr.groupValues[1]}[TOKEN TRUNCATED]" }
+    result = result.replace(AUTH_SCHEME_TOKEN_REGEX) { mr -> "${mr.groupValues[1]}[TOKEN TRUNCATED]" }
     return result
 }
 
@@ -346,6 +373,8 @@ private fun looksLikeAuthPayload(payload: String): Boolean {
     return trimmed.startsWith("Bearer ", ignoreCase = true) || trimmed.startsWith("eyJ")
 }
 
+private val AUTHORIZATION_HEADER_REGEX = Regex("(?i)(Authorization:\\s*).*")
+
 private fun injectIntoAuthHeader(headers: MutableMap<String, String>, payload: String) {
     val key = headers.keys.firstOrNull { it.equals("authorization", ignoreCase = true) }
     if (key != null) {
@@ -364,6 +393,24 @@ private fun injectIntoLastPathSegment(path: String, payload: String): String {
     } else {
         pathOnly.substring(0, lastSlash + 1) + payload + query
     }
+}
+
+/**
+ * Replaces the path segment at a given 0-based index — e.g. for "/teste/1233/abc",
+ * index 0 = "teste", index 1 = "1233", index 2 = "abc". Needed because
+ * injectIntoLastPathSegment only ever targets the LAST segment — a path ID that sits
+ * in the middle (e.g. "/api/users/1233/orders") couldn't be targeted at all before.
+ * Returns null if the index is out of range.
+ */
+private fun replacePathSegmentByIndex(path: String, index: Int, payload: String): String? {
+    val queryStart = path.indexOf('?')
+    val pathOnly    = if (queryStart != -1) path.substring(0, queryStart) else path
+    val query       = if (queryStart != -1) path.substring(queryStart) else ""
+    val leadingSlash = pathOnly.startsWith("/")
+    val segments = (if (leadingSlash) pathOnly.substring(1) else pathOnly).split("/").toMutableList()
+    if (index !in segments.indices) return null
+    segments[index] = payload
+    return (if (leadingSlash) "/" else "") + segments.joinToString("/") + query
 }
 
 /**
@@ -387,9 +434,27 @@ private fun looksLikeNamedParam(payload: String): Boolean {
  *
  * If the parameter does not exist in the string, returns null (no change).
  */
+// Unbounded cache growth over a long-running Burp session (many distinct param/field
+// names across many SendRequest calls) would slowly eat memory — cap it and wipe on
+// overflow instead of reaching for a full LRU for what's just a compile-avoidance cache.
+private const val MAX_INJECTION_REGEX_CACHE_SIZE = 256
+
+private fun java.util.concurrent.ConcurrentHashMap<String, Regex>.getOrCompileBounded(
+    key: String, compile: () -> Regex
+): Regex {
+    get(key)?.let { return it }
+    if (size >= MAX_INJECTION_REGEX_CACHE_SIZE) clear()
+    return getOrPut(key, compile)
+}
+
+private val paramValueRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+
 private fun replaceParamValue(paramString: String, paramName: String, newValue: String): String? {
-    // Captures name=value at start of string or after &
-    val regex = Regex("""(^|&)(${Regex.escape(paramName)})=([^&]*)""")
+    // Captures name=value at start of string or after & — cached per paramName since
+    // the same param is typically reused across every payload in an attack batch.
+    val regex = paramValueRegexCache.getOrCompileBounded(paramName) {
+        Regex("""(^|&)(${Regex.escape(paramName)})=([^&]*)""")
+    }
     val match = regex.find(paramString) ?: return null
     val prefix = match.groupValues[1]   // "" ou "&"
     // Always URL-encode the value — correct behavior for form-urlencoded
@@ -409,15 +474,23 @@ private fun replaceParamValue(paramString: String, paramName: String, newValue: 
  * If string, replaces with quotes.
  * Returns null if field not found.
  */
+// Valid JSON number grammar — rejects leading zeros (e.g. "0123"), which
+// toDoubleOrNull() accepts but which is not a legal JSON number literal.
+private val JSON_NUMBER_REGEX = Regex("""-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?""")
+private const val JSON_VALUE_PATTERN = """"([^"\\]|\\.)*"|true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?"""
+private val jsonFieldRegexCache = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+
 private fun replaceJsonValue(json: String, fieldName: String, newValue: String): String? {
     // Detect if newValue should be inserted as number/bool or JSON string
-    val isNumeric = newValue.toDoubleOrNull() != null
+    val isNumeric = JSON_NUMBER_REGEX.matches(newValue)
     val isBool    = newValue.equals("true", ignoreCase = true) || newValue.equals("false", ignoreCase = true)
     val isNull    = newValue.equals("null", ignoreCase = true)
 
-    // Regex that captures "fieldName": <value> — supports string, number, bool and null
-    val valuePattern = """"([^"\\]|\\.)*"|true|false|null|-?\d+(\.\d+)?([eE][+-]?\d+)?"""
-    val regex = Regex(""""${Regex.escape(fieldName)}"\s*:\s*($valuePattern)""")
+    // Regex that captures "fieldName": <value> — supports string, number, bool and null.
+    // Cached per fieldName since the same field is typically reused across every payload.
+    val regex = jsonFieldRegexCache.getOrCompileBounded(fieldName) {
+        Regex(""""${Regex.escape(fieldName)}"\s*:\s*($JSON_VALUE_PATTERN)""")
+    }
     val match = regex.find(json) ?: return null
 
     val replacement = when {
@@ -585,6 +658,8 @@ private fun injectExplicitHttp2(
  * Supported formats:
  *   "method"            → replaces HTTP verb on first line
  *   "path"              → replaces last path segment
+ *   "path:N"            → replaces the Nth path segment (0-based, e.g. "path:1" for
+ *                         "1233" in "/teste/1233/abc" — "path" alone only ever hits "abc")
  *   "body:paramName"    → replaces param value in form-urlencoded body
  *   "query:paramName"   → replaces param value in query string
  *   "header:HeaderName" → replaces header value
@@ -604,6 +679,15 @@ private fun resolveInjectAt(rawContent: String, injectAt: String, payload: Strin
             val parts = lines[0].trimEnd().split(" ")
             if (parts.size < 2) return null
             val newPath = injectIntoLastPathSegment(parts[1], payload)
+            lines[0] = "${parts[0]} $newPath ${parts.getOrElse(2) { "HTTP/1.1" }}"
+            lines.joinToString("\n")
+        }
+        injectAt.startsWith("path:", ignoreCase = true) -> {
+            val index = injectAt.substringAfter(":").toIntOrNull() ?: return null
+            val lines = rawContent.split("\n").toMutableList()
+            val parts = lines[0].trimEnd().split(" ")
+            if (parts.size < 2) return null
+            val newPath = replacePathSegmentByIndex(parts[1], index, payload) ?: return null
             lines[0] = "${parts[0]} $newPath ${parts.getOrElse(2) { "HTTP/1.1" }}"
             lines.joinToString("\n")
         }
@@ -639,6 +723,11 @@ private fun resolveInjectAtHttp2(
             Triple(path, payload, body)
         injectAt.equals("path", ignoreCase = true) ->
             Triple(injectIntoLastPathSegment(path, payload), method, body)
+        injectAt.startsWith("path:", ignoreCase = true) -> {
+            val index = injectAt.substringAfter(":").toIntOrNull() ?: return null
+            val newPath = replacePathSegmentByIndex(path, index, payload) ?: return null
+            Triple(newPath, method, body)
+        }
         injectAt.startsWith("body:", ignoreCase = true) -> {
             val paramName = injectAt.substringAfter(":")
             val newBody = replaceInBody(body, paramName, payload) ?: return null
@@ -664,7 +753,34 @@ private fun resolveInjectAtHttp2(
     }
 }
 
-private fun executeSendRequest(
+/**
+ * Normalizes a raw HTTP/1.1 message to CRLF line endings and recalculates
+ * Content-Length against the FINAL CRLF-converted body bytes.
+ *
+ * Must convert to CRLF *before* measuring body length — converting after
+ * measuring (the old approach) rewrites every embedded "\n" inside the body
+ * (e.g. pretty-printed JSON) to "\r\n" too, inflating the transmitted byte
+ * count past whatever Content-Length was computed from the pre-conversion body.
+ */
+private fun fixContentLengthAndNormalizeCrlf(rawContent: String): String {
+    val crlfContent = rawContent.replace("\r", "").replace("\n", "\r\n")
+    val headerBodySplit = crlfContent.indexOf("\r\n\r\n")
+    if (headerBodySplit == -1) return crlfContent
+
+    val headersPart = crlfContent.substring(0, headerBodySplit)
+    val bodyPart = crlfContent.substring(headerBodySplit + 4)
+    val bodyBytes = bodyPart.toByteArray(Charsets.UTF_8).size
+
+    val headerLines = headersPart.split("\r\n").toMutableList()
+    val clIdx = headerLines.indexOfFirst { it.trimStart().lowercase().startsWith("content-length:") }
+    if (clIdx != -1) {
+        headerLines[clIdx] = "Content-Length: $bodyBytes"
+    }
+
+    return headerLines.joinToString("\r\n") + "\r\n\r\n" + bodyPart
+}
+
+private suspend fun executeSendRequest(
     index: Int,
     payloads: List<String>?,
     numberOfRequests: Int,
@@ -673,10 +789,7 @@ private fun executeSendRequest(
     config: McpConfig,
     injectAt: String? = null
 ): String {
-    val filteredHistory = getFilteredHttpHistory(api)
-
-    // Search by real burpIndex — not by position in filtered list
-    val found = filteredHistory.firstOrNull { it.burpIndex == index }
+    val found = findFilteredHistoryItem(api, index)
         ?: return "[!] Item #$index not found in filtered history (may be static/out-of-scope)."
 
     val rawRequest = found.item.finalRequest()
@@ -722,18 +835,18 @@ private fun executeSendRequest(
         "zk-error", "x-cache", "vary"
     )
 
+    // Approval dialog always shows the same (unmodified) rawContent regardless of which
+    // payload iteration triggered it, and host/port never change across iterations —
+    // so the permission check only needs to happen once, not once per payload.
+    val allowed = HttpRequestSecurity.checkHttpRequestPermission(hostname, port, config, rawContent, api)
+    if (!allowed) {
+        return "[!] Request to $hostname:$port denied."
+    }
+
     for (i in 0 until iterations) {
-        if (i > 0 && delayMs > 0) Thread.sleep(delayMs)
+        if (i > 0 && delayMs > 0) delay(delayMs)
 
         val currentPayload = payloads?.getOrNull(i)
-
-        val allowed = runBlocking {
-            HttpRequestSecurity.checkHttpRequestPermission(hostname, port, config, rawContent, api)
-        }
-        if (!allowed) {
-            rawResults.add(ReqResult(i, currentPayload, 0, 0, 0L, "Denied by Burp", ""))
-            continue
-        }
 
         if (isHttp2) {
             var path = rawRequest.path() ?: "/"
@@ -748,6 +861,7 @@ private fun executeSendRequest(
             var body = rawRequest.bodyToString()
             var method = rawRequest.method() ?: "POST"
 
+            var injectionFailed = false
             if (currentPayload != null) {
                 when {
                     injectAt != null -> {
@@ -756,6 +870,8 @@ private fun executeSendRequest(
                             path   = result.first
                             method = result.second
                             body   = result.third
+                        } else {
+                            injectionFailed = true
                         }
                     }
                     hasMarker -> {
@@ -800,6 +916,14 @@ private fun executeSendRequest(
                 }
             }
 
+            if (injectionFailed) {
+                rawResults.add(ReqResult(
+                    i, currentPayload, 0, 0, 0L,
+                    "Injection target not found (injectAt=$injectAt) — request not sent", ""
+                ))
+                continue
+            }
+
             val pseudoHeaders = linkedMapOf(
                 ":scheme"    to (if (useHttps) "https" else "http"),
                 ":method"    to method,
@@ -826,7 +950,10 @@ private fun executeSendRequest(
                         "Use CreateRepeaterTab to inspect this endpoint manually in Burp Repeater."
                     break
                 }
-                throw e
+                // Don't let one failed request (timeout, connection reset, ...) discard
+                // every result already collected from earlier payloads in this batch.
+                rawResults.add(ReqResult(i, currentPayload, 0, 0, 0L, "Request failed: ${e.message}", ""))
+                continue
             }
             val latency  = System.currentTimeMillis() - t0
             val response = reqRes?.response()
@@ -847,11 +974,18 @@ private fun executeSendRequest(
         } else {
             var currentContent = rawContent
 
-            if (currentPayload != null) {
+            if (currentPayload != null && injectAt != null) {
+                val result = resolveInjectAt(currentContent, injectAt, currentPayload)
+                if (result == null) {
+                    rawResults.add(ReqResult(
+                        i, currentPayload, 0, 0, 0L,
+                        "Injection target not found (injectAt=$injectAt) — request not sent", ""
+                    ))
+                    continue
+                }
+                currentContent = result
+            } else if (currentPayload != null) {
                 currentContent = when {
-                    injectAt != null -> {
-                        resolveInjectAt(currentContent, injectAt, currentPayload) ?: currentContent
-                    }
                     hasMarker -> {
                         currentContent.replace("{{payload}}", currentPayload)
                     }
@@ -859,7 +993,7 @@ private fun executeSendRequest(
                         val bearerValue = if (currentPayload.startsWith("Bearer ", ignoreCase = true))
                             currentPayload else "Bearer $currentPayload"
                         currentContent.replace(
-                            Regex("(?i)(Authorization:\\s*).*"),
+                            AUTHORIZATION_HEADER_REGEX,
                             "$1$bearerValue"
                         )
                     }
@@ -891,25 +1025,7 @@ private fun executeSendRequest(
                 }
             }
 
-            // Recalculate Content-Length in raw HTTP/1.1 content
-            val contentWithCorrectLength = run {
-                val lines     = currentContent.split("\n").toMutableList()
-                val headerEnd = lines.indexOfFirst { it.trimEnd().isEmpty() }
-                if (headerEnd != -1) {
-                    val bodyBytes = lines.subList(headerEnd + 1, lines.size)
-                        .joinToString("\n")
-                        .toByteArray(Charsets.UTF_8).size
-                    val clIdx = lines.indexOfFirst {
-                        it.trimStart().lowercase().startsWith("content-length:")
-                    }
-                    if (clIdx != -1) {
-                        lines[clIdx] = "Content-Length: $bodyBytes"
-                    }
-                }
-                lines.joinToString("\n")
-            }
-
-            val fixedContent = contentWithCorrectLength.replace("\r", "").replace("\n", "\r\n")
+            val fixedContent = fixContentLengthAndNormalizeCrlf(currentContent)
             val request  = HttpRequest.httpRequest(
                 HttpService.httpService(hostname, port, useHttps), fixedContent)
             val t0       = System.currentTimeMillis()
@@ -923,7 +1039,10 @@ private fun executeSendRequest(
                         "Use CreateRepeaterTab to inspect this endpoint manually in Burp Repeater."
                     break
                 }
-                throw e
+                // Don't let one failed request (timeout, connection reset, ...) discard
+                // every result already collected from earlier payloads in this batch.
+                rawResults.add(ReqResult(i, currentPayload, 0, 0, 0L, "Request failed: ${e.message}", ""))
+                continue
             }
             val latency  = System.currentTimeMillis() - t0
             val response = reqRes?.response()
@@ -999,6 +1118,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "injectAt formats: " +
         "'method' → replaces HTTP verb (payloads: [\"GET\",\"PUT\",\"DELETE\"]); " +
         "'path' → replaces last path segment; " +
+        "'path:N' → replaces the Nth path segment, 0-based (e.g. 'path:1' hits \"1233\" in \"/teste/1233/abc\" — plain 'path' only ever hits \"abc\"); " +
         "'body:paramName' → replaces param value in form-urlencoded body (e.g. 'body:action'); " +
         "'query:paramName' → replaces param value in query string (e.g. 'query:page'); " +
         "'header:HeaderName' → replaces header value (e.g. 'header:User-Agent'). " +
@@ -1009,9 +1129,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "(4) otherwise → injects into last path segment. " +
         "Do NOT call any read tool after receiving user approval — call this directly."
     ) {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP send")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP send")
         if (!allowed) return@mcpTool "Denied"
 
         executeSendRequest(index, payloads, numberOfRequests, delaySeconds, api, config, injectAt)
@@ -1029,15 +1147,10 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "request #N in depth. The index here is the same Item #N shown by GetProxyHttpHistory " +
         "and matches the # column in Burp Proxy History."
     ) {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) return@mcpTool "Denied"
 
-        val filteredHistory = getFilteredHttpHistory(api)
-
-        // Search by real burpIndex
-        val found = filteredHistory.firstOrNull { it.burpIndex == index }
+        val found = findFilteredHistoryItem(api, index)
             ?: return@mcpTool "[!] Item #$index not found in filtered history (may be static/out-of-scope)."
 
         val serialized = removeVisualNoise(
@@ -1066,9 +1179,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "colors: list of highlight colors, e.g. [\"RED\"], [\"RED\",\"ORANGE\"]. " +
         "Valid colors: RED, ORANGE, YELLOW, GREEN, CYAN, BLUE, PINK, MAGENTA."
     ) {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) return@mcpPaginatedTool sequenceOf("Denied")
 
         val upperColors = colors.map { it.uppercase() }.toSet()
@@ -1112,9 +1223,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "For vulnerability analysis of a color group use GetRequestsByColor instead. " +
         "Item # matches the # column in Burp Proxy History."
     ) {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) return@mcpPaginatedTool sequenceOf("Denied")
 
         val filteredHistory = getFilteredHttpHistory(api)
@@ -1136,16 +1245,19 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             } catch (e: Exception) { "?" }
         }
 
-        // Group by color maintaining insertion order
+        // Group by color maintaining insertion order — reuse each item's serialized form
+        // for the summary too instead of re-running the whole encode/cleanup pipeline again.
         val byColor = linkedMapOf<String, MutableList<Triple<Int, String, String>>>()
+        val allSerialized = ArrayList<String>(filteredHistory.size)
         for (indexed in filteredHistory) {
             val label = highlightLabel(indexed.item)
+            val serialized = serialize(indexed)
+            allSerialized.add(serialized)
             byColor.getOrPut(label) { mutableListOf() }
-                .add(Triple(indexed.burpIndex, serialize(indexed), latencyMs(indexed)))
+                .add(Triple(indexed.burpIndex, serialized, latencyMs(indexed)))
         }
 
-        val jsonItemsForSummary = filteredHistory.map { serialize(it) }
-        val summary = summarizeHistory(jsonItemsForSummary)
+        val summary = summarizeHistory(allSerialized)
 
         val output = mutableListOf<String>()
         output.add(
@@ -1172,9 +1284,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Use Item # indices with SendRequest for attacks. " +
         "For deep analysis of a specific item use GetRequestByIndex instead."
     ) {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.HTTP_HISTORY, config, api, "HTTP history")
         if (!allowed) return@mcpPaginatedTool sequenceOf("Denied")
 
         val compiledRegex = Pattern.compile(regex)
@@ -1220,9 +1330,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
                     val n = h.name().lowercase()
                     if (n != "host") headers[n] = h.value()
                 }
-                var body = rawRequest.bodyToString()
+                val body = rawRequest.bodyToString()
                 val result = resolveInjectAtHttp2(path, method, headers, body, injectAt, payload)
-                if (result != null) { path = result.first; method = result.second; body = result.third }
+                    ?: return@mcpTool "[!] Injection failed: injectAt=\"$injectAt\" not found in request #$index (HTTP/2). Nothing sent."
+                path = result.first; method = result.second
+                val newBody = result.third
                 val pseudoHeaders = linkedMapOf(
                     ":scheme"    to (if (rawRequest.httpService().secure()) "https" else "http"),
                     ":method"    to method,
@@ -1231,10 +1343,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
                 )
                 headers.keys.removeIf { it.equals("content-length", ignoreCase = true) }
                 val headerList = (pseudoHeaders + headers).map { HttpHeader.httpHeader(it.key, it.value) }
-                HttpRequest.http2Request(rawRequest.httpService(), headerList, body)
+                HttpRequest.http2Request(rawRequest.httpService(), headerList, newBody)
             } else {
-                val injected = resolveInjectAt(rawContent, injectAt, payload) ?: rawContent
-                val fixed = injected.replace("\r", "").replace("\n", "\r\n")
+                val injected = resolveInjectAt(rawContent, injectAt, payload)
+                    ?: return@mcpTool "[!] Injection failed: injectAt=\"$injectAt\" not found in request #$index. Nothing sent."
+                val fixed = fixContentLengthAndNormalizeCrlf(injected)
                 HttpRequest.httpRequest(rawRequest.httpService(), fixed)
             }
         } else {
@@ -1270,9 +1383,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
                     val n = h.name().lowercase()
                     if (n != "host") headers[n] = h.value()
                 }
-                var body = rawRequest.bodyToString()
+                val body = rawRequest.bodyToString()
                 val result = resolveInjectAtHttp2(path, method, headers, body, injectAt, payload)
-                if (result != null) { path = result.first; method = result.second; body = result.third }
+                    ?: return@mcpTool "[!] Injection failed: injectAt=\"$injectAt\" not found in request #$index (HTTP/2). Nothing sent."
+                path = result.first; method = result.second
+                val newBody = result.third
                 val pseudoHeaders = linkedMapOf(
                     ":scheme"    to (if (rawRequest.httpService().secure()) "https" else "http"),
                     ":method"    to method,
@@ -1281,10 +1396,11 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
                 )
                 headers.keys.removeIf { it.equals("content-length", ignoreCase = true) }
                 val headerList = (pseudoHeaders + headers).map { HttpHeader.httpHeader(it.key, it.value) }
-                HttpRequest.http2Request(rawRequest.httpService(), headerList, body)
+                HttpRequest.http2Request(rawRequest.httpService(), headerList, newBody)
             } else {
-                val injected = resolveInjectAt(rawContent, injectAt, payload) ?: rawContent
-                val fixed = injected.replace("\r", "").replace("\n", "\r\n")
+                val injected = resolveInjectAt(rawContent, injectAt, payload)
+                    ?: return@mcpTool "[!] Injection failed: injectAt=\"$injectAt\" not found in request #$index. Nothing sent."
+                val fixed = fixContentLengthAndNormalizeCrlf(injected)
                 HttpRequest.httpRequest(rawRequest.httpService(), fixed)
             }
         } else {
@@ -1311,9 +1427,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     // -------------------------------------------------------------------------
 
     mcpPaginatedTool<GetProxyWebsocketHistory>("Proxy WebSocket history. Respects Project Scope.") {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WS history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WS history")
         if (!allowed) return@mcpPaginatedTool sequenceOf("Denied")
 
         api.proxy().webSocketHistory().reversed().asSequence()
@@ -1322,9 +1436,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
     mcpPaginatedTool<GetProxyWebsocketHistoryRegex>("Proxy WebSocket history matching Regex. Respects Project Scope.") {
-        val allowed = runBlocking {
-            checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WS history")
-        }
+        val allowed = checkHistoryPermissionOrDeny(HistoryAccessType.WEBSOCKET_HISTORY, config, api, "WS history")
         if (!allowed) return@mcpPaginatedTool sequenceOf("Denied")
 
         val compiledRegex = Pattern.compile(regex)
@@ -1400,6 +1512,7 @@ data class SendRequest(
     val injectAt: String? = null      // where to inject the payload — examples:
                                       //   "method"            → replaces HTTP verb
                                       //   "path"              → replaces last path segment
+                                      //   "path:1"            → replaces the Nth path segment (0-based)
                                       //   "body:action"       → replaces value of param 'action' in body
                                       //   "query:page"        → replaces value of param 'page' in query string
                                       //   "header:User-Agent" → replaces value of header 'User-Agent'

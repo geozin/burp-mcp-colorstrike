@@ -14,7 +14,7 @@ import kotlin.experimental.ExperimentalTypeInference
 @OptIn(InternalSerializationApi::class)
 inline fun <reified I : Any> Server.mcpTool(
     description: String,
-    crossinline execute: I.() -> List<PromptMessageContent>
+    crossinline execute: suspend I.() -> List<PromptMessageContent>
 ) {
     val toolName = I::class.simpleName?.toLowerSnakeCase() ?: error("Couldn't find name for ${I::class}")
 
@@ -47,7 +47,7 @@ inline fun <reified I : Any> Server.mcpTool(
 @JvmName("mcpToolString")
 inline fun <reified I : Any> Server.mcpTool(
     description: String,
-    crossinline execute: I.() -> String
+    crossinline execute: suspend I.() -> String
 ) {
     mcpTool<I>(description, execute = {
         listOf(TextContent(execute(this)))
@@ -59,7 +59,7 @@ inline fun <reified I : Any> Server.mcpTool(
 @JvmName("mcpToolUnit")
 inline fun <reified I : Any> Server.mcpTool(
     description: String,
-    crossinline execute: I.() -> Unit
+    crossinline execute: suspend I.() -> Unit
 ) {
     mcpTool<I>(description, execute = {
         execute(this)
@@ -71,7 +71,7 @@ inline fun <reified I : Any> Server.mcpTool(
 inline fun <reified I : Paginated, J : Any> Server.mcpPaginatedTool(
     description: String,
     noinline mapper: (J) -> CharSequence = { it.toString() },
-    crossinline execute: I.() -> List<J>
+    crossinline execute: suspend I.() -> List<J>
 ) {
     mcpTool<I>(description, execute = {
 
@@ -94,7 +94,7 @@ inline fun <reified I : Paginated, J : Any> Server.mcpPaginatedTool(
 
 inline fun <reified I : Paginated> Server.mcpPaginatedTool(
     description: String,
-    crossinline execute: I.() -> Sequence<String>
+    crossinline execute: suspend I.() -> Sequence<String>
 ) {
     mcpTool<I>(description, execute = {
         val seq = execute(this)
@@ -145,11 +145,15 @@ inline fun Server.mcpTool(
     )
 }
 
+private val SNAKE_CASE_BOUNDARY_1 = Regex("([a-z0-9])([A-Z])")
+private val SNAKE_CASE_BOUNDARY_2 = Regex("([A-Z])([A-Z][a-z])")
+private val SNAKE_CASE_SEPARATORS = Regex("[\\s-]+")
+
 fun String.toLowerSnakeCase(): String {
     return this
-        .replace(Regex("([a-z0-9])([A-Z])"), "$1_$2")
-        .replace(Regex("([A-Z])([A-Z][a-z])"), "$1_$2")
-        .replace(Regex("[\\s-]+"), "_")
+        .replace(SNAKE_CASE_BOUNDARY_1, "$1_$2")
+        .replace(SNAKE_CASE_BOUNDARY_2, "$1_$2")
+        .replace(SNAKE_CASE_SEPARATORS, "_")
         .lowercase()
 }
 

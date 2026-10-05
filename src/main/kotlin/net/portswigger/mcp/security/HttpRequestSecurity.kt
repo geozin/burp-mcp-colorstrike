@@ -64,6 +64,8 @@ object HttpRequestSecurity {
 
     var approvalHandler: UserApprovalHandler = SwingUserApprovalHandler()
 
+    private val LABEL_REGEX = Regex("^[a-zA-Z0-9-]+$")
+
     private fun isAutoApproved(hostname: String, port: Int, config: McpConfig): Boolean {
         val target = "$hostname:$port"
         val hostOnly = hostname
@@ -76,8 +78,18 @@ object HttpRequestSecurity {
                 approved.equals(hostOnly, ignoreCase = true) -> true
 
                 approved.startsWith("*.") -> {
-                    val domain = approved.substring(2)
-                    isValidWildcardMatch(hostname, domain)
+                    // Wildcard target may optionally carry a port, e.g. "*.example.com:8080".
+                    // Must split host/port BEFORE matching — otherwise the port never matches
+                    // since `hostname` (no port) can never end with ".domain:port".
+                    val wildcardTarget = approved.substring(2)
+                    val colonIdx = wildcardTarget.lastIndexOf(':')
+                    if (colonIdx == -1) {
+                        isValidWildcardMatch(hostname, wildcardTarget)
+                    } else {
+                        val domain = wildcardTarget.substring(0, colonIdx)
+                        val targetPort = wildcardTarget.substring(colonIdx + 1).toIntOrNull()
+                        targetPort == port && isValidWildcardMatch(hostname, domain)
+                    }
                 }
 
                 else -> false
@@ -98,9 +110,8 @@ object HttpRequestSecurity {
         if (subdomain.isEmpty()) return false
 
         return subdomain.split(".").all { label ->
-            label.isNotEmpty() && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-") && label.matches(
-                Regex("^[a-zA-Z0-9-]+$")
-            )
+            label.isNotEmpty() && label.length <= 63 && !label.startsWith("-") && !label.endsWith("-") &&
+                label.matches(LABEL_REGEX)
         }
     }
 
