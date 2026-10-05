@@ -1,7 +1,8 @@
 <p>
-	Integrates Burp Suite with AI clients using the Model Context Protocol (MCP). This extension exposes Burp
-	functionality through an MCP server, enabling AI assistants to perform security testing tasks, analyze traffic, and
-	interact with Burp tools programmatically.
+	ColorStrike integrates Burp Suite with AI clients using the Model Context Protocol (MCP), focused on a
+	color-based triage workflow for manual penetration testing. Highlight requests in Burp Proxy History, then let
+	the AI client analyze traffic by color group, identify attack vectors, and execute targeted payloads — a fork of
+	PortSwigger's official MCP Server extension.
 </p>
 
 <p>
@@ -16,25 +17,29 @@
 
 <h2>Features</h2>
 <ul>
-	<li>Send HTTP/1.1 and HTTP/2 requests directly from AI clients with security controls</li>
-	<li>Access and filter proxy history (HTTP and WebSocket) with regex support</li>
+	<li>Color-based triage: only requests highlighted in Proxy History reach the AI client — three read levels from
+		summary-only to fully untruncated, so context usage scales with how deep the analysis actually needs to go</li>
+	<li>Unified attack tool (SendRequest) with five injection modes — explicit targeting of body (JSON,
+		form-urlencoded, or multipart/form-data), query, header, method, or a specific path segment, plus marker and
+		automatic injection — and adaptive differential response analysis</li>
+	<li>Automatic HTTP/1.1 and HTTP/2 detection for every outgoing request, with real per-item baseline latency for
+		calibrating time-based attacks</li>
+	<li>Access and filter proxy HTTP and WebSocket history with regex support</li>
 	<li>Generate and poll Burp Collaborator payloads for out-of-band testing (Professional only)</li>
-	<li>Create Repeater tabs and send requests to Intruder</li>
-	<li>Export and modify project and user configuration via JSON</li>
-	<li>Control proxy intercept, task execution engine, and message editor contents</li>
-	<li>Built-in encoding utilities (URL, Base64) and random string generation</li>
-	<li>Automatic Claude Desktop installation with packaged stdio proxy server</li>
-	<li>Configurable target approval system for HTTP requests and history access</li>
+	<li>Create Repeater tabs and send requests to Intruder directly from an AI client</li>
+	<li>Built-in encoding utilities (URL, Base64) and proxy intercept control</li>
+	<li>Automatic Claude Desktop installation with a packaged stdio proxy server</li>
 </ul>
 
 <h2>Usage</h2>
 <ol>
 	<li>Navigate to the "MCP" tab and enable the MCP server.</li>
-	<li>Configure security settings including auto-approve targets and configuration editing permissions.</li>
+	<li>Highlight the requests you want the AI client to see directly in Burp Proxy History — that's the scope
+		boundary this extension uses instead of a per-request approval prompt.</li>
 	<li>Use the installer button to automatically configure Claude Desktop, or manually configure your MCP client to
 		connect to <code class="InlineCode">http://127.0.0.1:9876</code> (SSE mode) or use the packaged stdio proxy
 		server.</li>
 	<li>Interact with Burp through your AI client using the available MCP tools.</li>
 </ol>
 
-<p><br>Copyright &copy; 2025-2026 PortSwigger Ltd.</p>
+<p><br>Fork of PortSwigger's MCP Server. Copyright &copy; 2025-2026 geozin.</p>

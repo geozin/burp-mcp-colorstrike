@@ -1,6 +1,6 @@
 # burp-mcp-ColorStrike
 
-![Version](https://img.shields.io/badge/version-v1.0.1-blue)
+![Version](https://img.shields.io/badge/version-v1.1.0-blue)
 ![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Professional%20%7C%20Community-orange)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 ![Java](https://img.shields.io/badge/Java-17%2B-red)
@@ -26,7 +26,7 @@ Requests in Burp Proxy History are organized by highlight color. The LLM reads, 
 
 ### Unified Attack Tool
 `SendRequest` is the only tool that sends data to the target. It supports:
-- **Explicit injection** via `injectAt` — `"body:param"`, `"query:param"`, `"header:Name"`, `"method"`, `"path"`
+- **Explicit injection** via `injectAt` — `"body:param"` (JSON, form-urlencoded, or multipart/form-data — e.g. `"body:avatar.filename"`), `"query:param"`, `"header:Name"`, `"method"`, `"path"` (last segment), `"path[N]"` (Nth segment by index), `"path:value"` (segment matching a given current value)
 - **Marker injection** — place `{{payload}}` anywhere in the request
 - **Auto injection** — JWT/Bearer auto-routes to Authorization header; fallback to last path segment
 - **Differential analysis** — adaptive response output: size/status diff detection, body preview when uniform
@@ -171,7 +171,7 @@ A purpose-built system prompt (`prompt_v20.md`) drives the LLM through a structu
 Download the latest release directly:
 
 ```
-https://github.com/geozin/burp-mcp-colorstrike/releases/download/v1.0.1/burp-mcp-ColorStrike-all.jar
+https://github.com/geozin/burp-mcp-colorstrike/releases/download/v1.1.0/burp-mcp-ColorStrike-all.jar
 ```
 
 ### Option 2 — Build from Source
@@ -231,8 +231,9 @@ Use the **Extract Proxy JAR** button in the  tab inside Burp to extract the prox
 In the **MCP tab** within Burp Suite:
 
 - **Enabled** — toggle the MCP server on/off
-- **Enable tools that can edit your config** — exposes config editing tools
 - **Host / Port** — default `127.0.0.1:9876`
+
+HTTP requests and history access proceed without a per-call approval dialog — scope is set by highlighting requests in Proxy History (the color-based triage filter), not by a confirmation popup on every call. Approval can still be re-enabled by flipping `requireHttpRequestApproval` / `requireHistoryAccessApproval` in the extension's persisted settings if you want that extra gate back.
 
 ---
 

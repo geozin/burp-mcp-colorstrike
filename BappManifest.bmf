@@ -1,13 +1,13 @@
-Uuid: 9952290f04ed4f628e624d0aa9dccebc 
+Uuid: 7cee66350e9a4188b977718d9c5462b8
 ExtensionType: 1
-Name: MCP Server
-RepoName: mcp-server
-ScreenVersion: 1.2.1
-SerialVersion: 7
+Name: ColorStrike
+RepoName: burp-mcp-colorstrike
+ScreenVersion: 1.1.0
+SerialVersion: 1
 MinPlatformVersion: 2
 ProOnly: False
-Author: Daniel S, PortSwigger & Daniel Allen, PortSwigger
-ShortDescription: Integrate Burp Suite with AI Clients using the Model Context Protocol (MCP).
-EntryPoint: burp-mcp-all.jar
+Author: geozin (fork of Daniel S & Daniel Allen, PortSwigger)
+ShortDescription: AI-driven offensive testing via a color-based triage workflow — a Burp MCP server for manual penetration testing.
+EntryPoint: burp-mcp-ColorStrike-all.jar
 BuildCommand: ./gradlew embedProxyJar
 SupportedProducts: Pro, Community

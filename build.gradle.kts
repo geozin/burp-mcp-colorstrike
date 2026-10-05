@@ -132,9 +132,14 @@ tasks {
     }
 
     shadowJar {
-        archiveClassifier.set("")
+        // archiveClassifier/archiveVersion are set here too, but the Ktor Gradle plugin
+        // reconfigures this same task in its own afterEvaluate hook, which runs after this
+        // block regardless of script order and resets both back to its own "-all" convention
+        // with no version segment — only archiveBaseName survives that override. Rather than
+        // fight it with another afterEvaluate, every doc/link in this repo (README, USAGE,
+        // install instructions) is written against the name Ktor actually produces:
+        // burp-mcp-ColorStrike-all.jar.
         archiveBaseName.set("burp-mcp-ColorStrike")
-        archiveVersion.set("v${project.version}")
         mergeServiceFiles()
 
         manifest {
