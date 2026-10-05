@@ -52,14 +52,25 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
 
     private var toggleListener: ((Boolean) -> Unit)? = null
     private var suppressToggleEvents: Boolean = false
+    private var historyAccessRefreshListener: (() -> Unit)? = null
 
     init {
         enabledToggle.setState(config.enabled, animate = false)
         hostField.text = config.host
         portField.text = config.port.toString()
 
-        initializeComponents()
-        buildUi()
+        // Panel construction touches Swing components and must happen on the EDT.
+        // ConfigUi is instantiated from BurpExtension.initialize(), which Burp calls
+        // on its own extension-loading thread, not the EDT.
+        if (SwingUtilities.isEventDispatchThread()) {
+            initializeComponents()
+            buildUi()
+        } else {
+            SwingUtilities.invokeAndWait {
+                initializeComponents()
+                buildUi()
+            }
+        }
     }
 
     private fun initializeComponents() {
@@ -81,18 +92,22 @@ class ConfigUi(private val config: McpConfig, private val providers: List<Provid
     }
 
     private fun setupConfigListeners() {
-        val historyAccessRefreshListener = {
+        // Keep a strong reference on this field: the listener registry holds only a
+        // WeakReference, so a local-variable lambda here would be eligible for GC at
+        // the next collection, silently stopping checkbox updates.
+        historyAccessRefreshListener = {
             SwingUtilities.invokeLater {
                 serverConfigurationPanel.updateHistoryAccessCheckboxes()
             }
         }
-        val handle = config.addHistoryAccessChangeListener(historyAccessRefreshListener)
+        val handle = config.addHistoryAccessChangeListener(historyAccessRefreshListener!!)
         listenerHandles.add(handle)
     }
 
     fun cleanup() {
         listenerHandles.forEach { it.remove() }
         listenerHandles.clear()
+        historyAccessRefreshListener = null
 
         if (::autoApproveTargetsPanel.isInitialized) {
             autoApproveTargetsPanel.cleanup()

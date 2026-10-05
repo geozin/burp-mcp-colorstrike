@@ -196,6 +196,12 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
     private var sparkles = mutableListOf<Sparkle>()
     private var sparkleTimer: Timer? = null
 
+    // Reused across paint calls instead of allocating fresh geometry/stroke every frame.
+    private val trackShape = RoundRectangle2D.Float()
+    private val shadowShape = RoundRectangle2D.Float()
+    private val thumbShape = RoundRectangle2D.Float()
+    private val sparkleStroke = BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+
     private data class Sparkle(
         var x: Float,
         var y: Float,
@@ -360,25 +366,28 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
         val trackY = SPARKLE_MARGIN.toFloat()
 
         g2.color = if (isOn) Design.Colors.primary else Design.Colors.outline
-        g2.fill(createRoundRect(trackX, trackY, TRACK_WIDTH.toFloat(), TRACK_HEIGHT.toFloat(), TRACK_HEIGHT.toFloat()))
+        trackShape.setRoundRect(trackX, trackY, TRACK_WIDTH.toFloat(), TRACK_HEIGHT.toFloat(), TRACK_HEIGHT.toFloat(), TRACK_HEIGHT.toFloat())
+        g2.fill(trackShape)
 
         val thumbX = trackX + PADDING + animationProgress * (TRACK_WIDTH - THUMB_SIZE - 2 * PADDING)
         val thumbY = trackY + PADDING
 
         g2.color = Color(0, 0, 0, 20)
-        g2.fill(
-            createRoundRect(
-                thumbX + 1,
-                thumbY + 1,
-                THUMB_SIZE.toFloat(),
-                THUMB_SIZE.toFloat(),
-                THUMB_SIZE.toFloat()
-            )
+        shadowShape.setRoundRect(
+            thumbX + 1,
+            thumbY + 1,
+            THUMB_SIZE.toFloat(),
+            THUMB_SIZE.toFloat(),
+            THUMB_SIZE.toFloat(),
+            THUMB_SIZE.toFloat()
         )
+        g2.fill(shadowShape)
 
         g2.color = Color.WHITE
-        g2.fill(createRoundRect(thumbX, thumbY, THUMB_SIZE.toFloat(), THUMB_SIZE.toFloat(), THUMB_SIZE.toFloat()))
+        thumbShape.setRoundRect(thumbX, thumbY, THUMB_SIZE.toFloat(), THUMB_SIZE.toFloat(), THUMB_SIZE.toFloat(), THUMB_SIZE.toFloat())
+        g2.fill(thumbShape)
 
+        g2.stroke = sparkleStroke
         for (sparkle in sparkles) {
             if (sparkle.opacity > 0) {
                 val alpha = (sparkle.opacity * 255).toInt().coerceIn(0, 255)
@@ -389,7 +398,6 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
                 val cy = sparkle.y
 
                 g2.color = Color(255, 215, 0, alpha)
-                g2.stroke = BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
 
                 g2.drawLine(
                     (cx - sparkleSize).toInt(),
@@ -431,13 +439,9 @@ class ToggleSwitch(private var isOn: Boolean, private val onToggle: (Boolean) ->
         repaint() // Repaint to use updated theme colors
     }
 
-    private fun createRoundRect(
-        x: Float,
-        y: Float,
-        width: Float,
-        height: Float,
-        arcSize: Float
-    ): RoundRectangle2D.Float {
-        return RoundRectangle2D.Float(x, y, width, height, arcSize, arcSize)
+    override fun removeNotify() {
+        super.removeNotify()
+        animationTimer?.stop()
+        sparkleTimer?.stop()
     }
 }

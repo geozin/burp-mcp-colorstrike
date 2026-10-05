@@ -9,6 +9,9 @@ import javax.swing.*
 import javax.swing.Box.createVerticalStrut
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
+import javax.swing.text.AbstractDocument
+import javax.swing.text.AttributeSet
+import javax.swing.text.DocumentFilter
 
 class AdvancedOptionsPanel(
     private val hostField: JTextField,
@@ -51,6 +54,23 @@ class AdvancedOptionsPanel(
     private fun setupFieldTracking() {
         trackChanges(hostField)
         trackChanges(portField)
+        applyDigitsOnlyFilter(portField)
+    }
+
+    private fun applyDigitsOnlyFilter(field: JTextField) {
+        (field.document as? AbstractDocument)?.documentFilter = object : DocumentFilter() {
+            override fun insertString(fb: FilterBypass, offset: Int, string: String?, attr: AttributeSet?) {
+                if (string != null && string.all { it.isDigit() }) {
+                    super.insertString(fb, offset, string, attr)
+                }
+            }
+
+            override fun replace(fb: FilterBypass, offset: Int, length: Int, text: String?, attrs: AttributeSet?) {
+                if (text == null || text.all { it.isDigit() }) {
+                    super.replace(fb, offset, length, text, attrs)
+                }
+            }
+        }
     }
 
     private fun trackChanges(field: JTextField) {

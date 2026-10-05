@@ -4,6 +4,8 @@ import net.portswigger.mcp.config.Design
 import java.awt.BorderLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.JPanel
@@ -22,6 +24,15 @@ class ResponsiveColumnsPanel(private val leftPanel: JPanel, private val rightPan
     init {
         isInitialized = true
         updateLayout()
+
+        // Recompute the column layout only in response to actual size changes, rather
+        // than from doLayout() itself: calling removeAll()/revalidate() from inside
+        // doLayout() can trigger another layout pass, looping.
+        addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent?) {
+                checkAndUpdateLayout()
+            }
+        })
     }
 
     override fun updateUI() {
@@ -31,8 +42,7 @@ class ResponsiveColumnsPanel(private val leftPanel: JPanel, private val rightPan
         }
     }
 
-    override fun doLayout() {
-        super.doLayout()
+    private fun checkAndUpdateLayout() {
         val currentLayout = if (width >= minWidthForTwoColumns) Layout.TWO_COLUMNS else Layout.SINGLE_COLUMN
         val currentPaddingSize = if (width >= minWidthForLargePadding) PaddingSize.LARGE else PaddingSize.SMALL
 

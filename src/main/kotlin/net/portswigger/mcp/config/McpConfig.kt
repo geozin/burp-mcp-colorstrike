@@ -40,11 +40,16 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     private val targetsChangeListeners = CopyOnWriteArrayList<ListenerRegistration>()
     private val historyAccessChangeListeners = CopyOnWriteArrayList<ListenerRegistration>()
 
+    // Parsed once per actual change instead of re-splitting the comma-joined string on
+    // every single permission check (getAutoApproveTargetsList() is called per HTTP request).
+    private var cachedAutoApproveTargetsList: List<String>? = null
+
     var autoApproveTargets: String
         get() = _autoApproveTargets
         set(value) {
             if (_autoApproveTargets != value) {
                 _autoApproveTargets = value
+                cachedAutoApproveTargetsList = null
                 notifyTargetsChanged()
             }
         }
@@ -70,11 +75,14 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     }
 
     fun getAutoApproveTargetsList(): List<String> {
-        return if (_autoApproveTargets.isBlank()) {
+        cachedAutoApproveTargetsList?.let { return it }
+        val parsed = if (_autoApproveTargets.isBlank()) {
             emptyList()
         } else {
             _autoApproveTargets.split(",").map { it.trim() }.filter { it.isNotEmpty() }
         }
+        cachedAutoApproveTargetsList = parsed
+        return parsed
     }
 
     fun clearAutoApproveTargets() {
