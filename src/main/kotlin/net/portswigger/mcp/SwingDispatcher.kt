@@ -6,6 +6,8 @@ import java.awt.EventQueue
 import kotlin.coroutines.CoroutineContext
 
 object SwingDispatcher : CoroutineDispatcher() {
+    override fun isDispatchNeeded(context: CoroutineContext): Boolean = !EventQueue.isDispatchThread()
+
     override fun dispatch(context: CoroutineContext, block: Runnable) {
         if (EventQueue.isDispatchThread()) {
             block.run()

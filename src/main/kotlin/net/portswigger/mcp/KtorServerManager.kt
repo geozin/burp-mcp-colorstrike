@@ -19,17 +19,30 @@ import java.net.URI
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+
+private val ALLOWED_LOCAL_HOSTS = setOf("localhost", "127.0.0.1")
+private val BROWSER_USER_AGENT_INDICATORS = listOf(
+    "mozilla/", "chrome/", "safari/", "webkit/", "gecko/", "firefox/", "edge/", "opera/", "browser"
+)
 
 class KtorServerManager(private val api: MontoyaApi) : ServerManager {
 
+    @Volatile
     private var server: EmbeddedServer<*, *>? = null
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val isShuttingDown = AtomicBoolean(false)
 
     override fun start(config: McpConfig, callback: (ServerState) -> Unit) {
         callback(ServerState.Starting)
 
         executor.submit {
             try {
+                if (isShuttingDown.get()) {
+                    callback(ServerState.Stopped)
+                    return@submit
+                }
+
                 server?.stop(1000, 5000)
                 server = null
 
@@ -68,7 +81,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                             api.logging().logToOutput("Blocked DNS rebinding attack from origin: $origin")
                             call.respond(HttpStatusCode.Forbidden)
                             return@intercept
-                        } else if (isBrowserRequest(userAgent)) {
+                        } else if (origin == null && isBrowserRequest(userAgent)) {
                             api.logging().logToOutput("Blocked browser request without Origin header")
                             call.respond(HttpStatusCode.Forbidden)
                             return@intercept
@@ -101,6 +114,14 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
                     start(wait = false)
                 }
 
+                if (isShuttingDown.get()) {
+                    server?.stop(1000, 5000)
+                    server = null
+                    api.logging().logToOutput("Shutdown requested during startup; stopped MCP server")
+                    callback(ServerState.Stopped)
+                    return@submit
+                }
+
                 api.logging().logToOutput("Started MCP server on ${config.host}:${config.port}")
                 callback(ServerState.Running)
 
@@ -128,8 +149,16 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
     }
 
     override fun shutdown() {
-        server?.stop(1000, 5000)
-        server = null
+        isShuttingDown.set(true)
+
+        executor.submit {
+            try {
+                server?.stop(1000, 5000)
+                server = null
+            } catch (e: Exception) {
+                api.logging().logToError(e)
+            }
+        }
 
         executor.shutdown()
         executor.awaitTermination(10, TimeUnit.SECONDS)
@@ -140,9 +169,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             val url = URI(origin).toURL()
             val hostname = url.host.lowercase()
 
-            val allowedHosts = setOf("localhost", "127.0.0.1")
-
-            return hostname in allowedHosts
+            return hostname in ALLOWED_LOCAL_HOSTS
         } catch (_: Exception) {
             return false
         }
@@ -152,11 +179,8 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
         if (userAgent == null) return false
 
         val userAgentLower = userAgent.lowercase()
-        val browserIndicators = listOf(
-            "mozilla/", "chrome/", "safari/", "webkit/", "gecko/", "firefox/", "edge/", "opera/", "browser"
-        )
 
-        return browserIndicators.any { userAgentLower.contains(it) }
+        return BROWSER_USER_AGENT_INDICATORS.any { userAgentLower.contains(it) }
     }
 
     private fun isValidHost(host: String, expectedPort: Int): Boolean {
@@ -165,8 +189,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             val hostname = parts[0].lowercase()
             val port = if (parts.size > 1) parts[1].toIntOrNull() else null
 
-            val allowedHosts = setOf("localhost", "127.0.0.1")
-            if (hostname !in allowedHosts) {
+            if (hostname !in ALLOWED_LOCAL_HOSTS) {
                 return false
             }
 
@@ -185,8 +208,7 @@ class KtorServerManager(private val api: MontoyaApi) : ServerManager {
             val url = URI(referer).toURL()
             val hostname = url.host.lowercase()
 
-            val allowedHosts = setOf("localhost", "127.0.0.1")
-            return hostname in allowedHosts
+            return hostname in ALLOWED_LOCAL_HOSTS
 
         } catch (_: Exception) {
             return false
