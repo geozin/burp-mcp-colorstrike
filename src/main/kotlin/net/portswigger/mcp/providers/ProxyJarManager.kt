@@ -5,8 +5,10 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.DigestInputStream
 import java.security.MessageDigest
 import kotlin.io.path.exists
+import kotlin.io.path.outputStream
 import kotlin.io.path.readText
 
 class ProxyJarManager(private val logging: Logging) {
@@ -31,17 +33,18 @@ class ProxyJarManager(private val logging: Logging) {
             ?: throw RuntimeException("Could not find $PROXY_JAR_NAME in extension resources")
 
         val digest = MessageDigest.getInstance("SHA-256")
-        val resourceBytes = resourceStream.readAllBytes()
-        val resourceHash = digest.digest(resourceBytes).joinToString("") { "%02x".format(it) }
+        val tempFile = Files.createTempFile(proxyJarPath.parent, "temp-", ".jar")
 
-        val needsExtraction =
-            !proxyJarPath.exists() || !versionFilePath.exists() || versionFilePath.readText().trim() != resourceHash
+        try {
+            DigestInputStream(resourceStream, digest).use { digestStream ->
+                tempFile.outputStream().use { out -> digestStream.copyTo(out) }
+            }
+            val resourceHash = digest.digest().joinToString("") { "%02x".format(it) }
 
-        if (needsExtraction) {
-            try {
-                val tempFile = Files.createTempFile(proxyJarPath.parent, "temp-", ".jar")
-                Files.write(tempFile, resourceBytes)
+            val needsExtraction =
+                !proxyJarPath.exists() || !versionFilePath.exists() || versionFilePath.readText().trim() != resourceHash
 
+            if (needsExtraction) {
                 Files.move(tempFile, proxyJarPath, StandardCopyOption.REPLACE_EXISTING)
 
                 Files.writeString(versionFilePath, resourceHash)
@@ -51,9 +54,12 @@ class ProxyJarManager(private val logging: Logging) {
                 }
 
                 logging.logToOutput("Extracted proxy jar to: $proxyJarPath")
-            } catch (e: IOException) {
-                throw RuntimeException("Failed to extract proxy jar to: $proxyJarPath", e)
+            } else {
+                Files.deleteIfExists(tempFile)
             }
+        } catch (e: IOException) {
+            Files.deleteIfExists(tempFile)
+            throw RuntimeException("Failed to extract proxy jar to: $proxyJarPath", e)
         }
 
         return proxyJarPath
